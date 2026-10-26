@@ -43,6 +43,25 @@ object Backup {
             .put("salt", b64e(salt)).put("iv", b64e(iv)).put("tag", b64e(tag)).put("payload", b64e(ct))
     }
 
+    private fun groupKey(secret: String) = java.security.MessageDigest.getInstance("SHA-256").digest(("luma-group:" + secret).toByteArray(Charsets.UTF_8))
+
+    /** Печать ключом группы устройств: AES-256-GCM, ключ из SHA-256. Тот же формат, что в Luma для Windows. */
+    fun sealK(plain: String, secret: String): JSONObject {
+        val iv = ByteArray(12).also { java.security.SecureRandom().nextBytes(it) }
+        val c = Cipher.getInstance("AES/GCM/NoPadding")
+        c.init(Cipher.ENCRYPT_MODE, SecretKeySpec(groupKey(secret), "AES"), GCMParameterSpec(128, iv))
+        val out = c.doFinal(plain.toByteArray(Charsets.UTF_8))
+        return JSONObject().put("app", "Luma").put("format", 2).put("encrypted", true).put("kdf", "sha256")
+            .put("iv", b64e(iv)).put("tag", b64e(out.copyOfRange(out.size - 16, out.size))).put("payload", b64e(out.copyOfRange(0, out.size - 16)))
+    }
+    fun unsealK(file: JSONObject, secret: String): String {
+        try {
+            val c = Cipher.getInstance("AES/GCM/NoPadding")
+            c.init(Cipher.DECRYPT_MODE, SecretKeySpec(groupKey(secret), "AES"), GCMParameterSpec(128, b64(file.getString("iv"))))
+            return String(c.doFinal(b64(file.getString("payload")) + b64(file.getString("tag"))), Charsets.UTF_8)
+        } catch (e: Exception) { throw Bad("BAD_KEY") }
+    }
+
     /** Расшифровывает запечатанный объект; при неверном пароле бросает Bad("BAD_PASSWORD"). */
     fun unseal(file: JSONObject, password: String): String {
         try {

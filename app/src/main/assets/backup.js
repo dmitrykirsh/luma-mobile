@@ -8,6 +8,11 @@ function mergeBackup(b) {
   const m = new Map();
   for (const x of [...(S.history || []), ...(d.history || [])]) { const o = m.get(x.id); if (!o || (x.ts || 0) > (o.ts || 0)) m.set(x.id, x); }
   S.history = [...m.values()].sort((a, b2) => (b2.ts || 0) - (a.ts || 0)).slice(0, 60);
+  S.gone = S.gone || {};
+  for (const [gk, gts] of Object.entries(d.gone || {})) if (gts > (S.gone[gk] || 0)) S.gone[gk] = gts;   // отметки об удалении: удалённое на одном устройстве не возвращается с другого
+  { const cut = Date.now() - 90 * 864e5; for (const gk of Object.keys(S.gone)) if (S.gone[gk] < cut) delete S.gone[gk]; }
+  S.favs = S.favs.filter((f) => !(S.gone['f:' + f.id] > (f.at || 0)));
+  S.history = S.history.filter((h) => !(S.gone['h:' + h.id] > (h.ts || 0)));
   S.seen = { ...(S.seen || {}) };
   for (const [k, arr] of Object.entries(d.seen || {})) S.seen[k] = [...new Set([...(S.seen[k] || []), ...arr])];
   S.progress = { ...(S.progress || {}) };

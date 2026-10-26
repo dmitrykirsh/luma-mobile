@@ -19,6 +19,8 @@ class ImportServer(private val onData: (String) -> Unit, private val onError: (S
 
     // синхронизация с компьютером: код сопряжения, наши данные для ответа и что делать с полученными
     @Volatile var syncCode: String? = null
+    @Volatile var groupId: String = ""
+    @Volatile var groupKey: String = ""
     @Volatile var syncExport: String = "{}"
     @Volatile var deviceName: String = ""
     @Volatile var onSyncIn: (String) -> Unit = {}
@@ -49,6 +51,7 @@ class ImportServer(private val onData: (String) -> Unit, private val onError: (S
             val out = c.getOutputStream()
             if (path == "/sync/info") { reply(out, 200, "application/json", JSONObject().put("app", "luma-tv").put("name", deviceName).toString()); return }
             if (path == "/sync/exchange" && method == "POST") { syncExchange(inp, len, out); return }
+            if (path == "/sync/v2" && method == "POST") { syncV2(inp, len, out); return }
             val okPin = Regex("(^|&)k=$pin($|&)").containsMatchIn(q)
             if (!okPin) { reply(out, 403, "text/plain; charset=utf-8", "Ссылка устарела. Откройте QR на экране ТВ заново."); return }
             if (method == "GET") { reply(out, 200, "text/html; charset=utf-8", if (Regex("(^|&)m=pl($|&)").containsMatchIn(q)) PAGE_PL else PAGE); return }
@@ -91,6 +94,23 @@ class ImportServer(private val onData: (String) -> Unit, private val onError: (S
             reply(out, 200, "application/json", resp.toString())
             onSyncIn(plain)
         } catch (e: Backup.Bad) { reply(out, 200, "application/json", "{\"error\":\"BAD_CODE\"}") }
+        catch (e: Exception) { reply(out, 400, "application/json", "{\"error\":\"BAD_REQUEST\"}") }
+    }
+
+    /** Обмен без кода: тело запечатано ключом группы; отвечаем своими данными, запечатанными тем же ключом. */
+    private fun syncV2(inp: BufferedInputStream, len: Int, out: java.io.OutputStream) {
+        val key = groupKey
+        if (groupId.isEmpty() || key.isEmpty() || len !in 1..(24 * 1024 * 1024)) { reply(out, 200, "application/json", "{\"error\":\"NO_GROUP\"}"); return }
+        val buf = ByteArray(len); var n = 0
+        while (n < len) { val r = inp.read(buf, n, len - n); if (r < 0) break; n += r }
+        try {
+            val j = JSONObject(String(buf, 0, n, Charsets.UTF_8))
+            if (j.optString("gid") != groupId) { reply(out, 200, "application/json", "{\"error\":\"OTHER_GROUP\"}"); return }
+            val plain = Backup.unsealK(j.getJSONObject("sealed"), key)
+            val resp = JSONObject().put("ok", true).put("name", deviceName).put("sealed", Backup.sealK(syncExport, key))
+            reply(out, 200, "application/json", resp.toString())
+            onSyncIn(plain)
+        } catch (e: Backup.Bad) { reply(out, 200, "application/json", "{\"error\":\"BAD_KEY\"}") }
         catch (e: Exception) { reply(out, 400, "application/json", "{\"error\":\"BAD_REQUEST\"}") }
     }
 

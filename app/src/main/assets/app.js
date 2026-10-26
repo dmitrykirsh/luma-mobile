@@ -32,10 +32,10 @@ const SORTS = [['popular', 'Популярное'], ['new', 'Новинки'], [
 
 /* ---------- хранилище ---------- */
 const LS = 'luma.m';
-let S = { favs: [], history: [], progress: {}, seen: {}, done: {}, secrets: {}, extra: {} };
+let S = { favs: [], history: [], progress: {}, seen: {}, done: {}, gone: {}, secrets: {}, extra: {} };
 try { S = { ...S, ...JSON.parse(localStorage.getItem(LS) || '{}') }; } catch {}
 let saveT = 0;
-const save = () => { clearTimeout(saveT); saveT = setTimeout(() => { try { localStorage.setItem(LS, JSON.stringify(S)); } catch {} }, 250); };
+const save = () => { clearTimeout(saveT); saveT = setTimeout(() => { try { localStorage.setItem(LS, JSON.stringify(S)); } catch {} try { if (S.group && NATIVE && NATIVE.syncUpdate) NATIVE.syncUpdate(exportJson()); } catch {} }, 250); };
 
 /* ---------- API (несколько зеркал, пробуем по очереди) ---------- */
 const cache = new Map();
@@ -73,10 +73,11 @@ function seasonsOf(d) {
 
 /* ---------- данные пользователя ---------- */
 const brief = (it) => ({ id: it.id, type: it.type, name: it.name, origin_name: it.origin_name, poster: it.poster, year: it.year, kp_rating: it.kp_rating ?? it.kp, imdb_rating: it.imdb_rating ?? it.imdb, quality: it.quality });
+const goneMark = (k, id) => { S.gone = S.gone || {}; S.gone[k + ':' + id] = Date.now(); };
 const isFav = (id) => S.favs.some((f) => f.id === id);
 function toggleFav(it) {
-  if (isFav(it.id)) { S.favs = S.favs.filter((f) => f.id !== it.id); toast('Убрано из избранного'); }
-  else { S.favs.unshift(brief(it)); toast('Добавлено в избранное'); }
+  if (isFav(it.id)) { S.favs = S.favs.filter((f) => f.id !== it.id); goneMark('f', it.id); toast('Убрано из избранного'); }
+  else { S.favs.unshift({ ...brief(it), at: Date.now() }); toast('Добавлено в избранное'); }
   save(); return isFav(it.id);
 }
 function addHistory(it, season, episode) {
@@ -257,7 +258,7 @@ function renderMine(t) {
       const id = +c.dataset.id, h = S.history.find((x) => x.id === id); if (!h) return;
       const sh = openSheet(`<h3>${esc(h.name)}</h3><p class="sub">Убрать из списка «Продолжить просмотр»?</p><div class="dbtns"><button class="btn primary" id="hdel">Убрать</button><button class="btn" id="hno">Отмена</button></div>`);
       $('#hno', sh).onclick = closeSheet;
-      $('#hdel', sh).onclick = () => { S.history = S.history.filter((x) => x.id !== id); save(); closeSheet(); toast('Убрано из списка'); if (tab === 'home') renderTab(); };
+      $('#hdel', sh).onclick = () => { S.history = S.history.filter((x) => x.id !== id); goneMark('h', id); save(); closeSheet(); toast('Убрано из списка'); if (tab === 'home') renderTab(); };
     }, 550);
   });
   document.addEventListener('pointermove', (e) => { if (Math.abs(e.clientX - sx) > 10 || Math.abs(e.clientY - sy) > 10) cancel(); });

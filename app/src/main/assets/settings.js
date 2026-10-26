@@ -80,53 +80,127 @@ function updText() {
 }
 function updPaint() { const el = $('#updRow'); if (!el) return; const [h, sub] = updText(); $('div', el).innerHTML = `${esc(h)}<small>${esc(sub)}</small>`; el.dataset.act = UPD.state === 'available' || UPD.state === 'needperm' || (UPD.state === 'error' && UPD.url) ? 'updinstall' : 'updcheck'; }
 
-/* ---------- синхронизация с компьютером и ТВ ---------- */
-const SY = { code: '', found: [], scanning: false, busy: '' };
+/* ---------- синхронизация между устройствами ----------
+   Первый раз устройства подключаются друг к другу по коду (и заодно получают общий ключ группы). Дальше все устройства группы
+   сами находят друг друга в сети и обмениваются данными без кодов: при запуске, при возвращении в приложение, после просмотра,
+   каждые несколько минут, по кнопке и (на телефоне) в фоне раз в 15 минут. */
+const SY = { code: '', found: [], scanning: false, busy: '', auto: false, again: false, last: 0, peers: [], status: '' };
+const rnd = (n, abc) => Array.from(crypto.getRandomValues(new Uint8Array(n)), (b) => abc[b % abc.length]).join('');
+const HEX = '0123456789abcdef', B62 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+if (!S.did) { S.did = rnd(12, HEX); save(); }
+function ensureGroup() { if (!S.group) { S.group = { id: rnd(8, HEX), key: rnd(28, B62) }; save(); } return S.group; }
 function exportJson() {
   const x = tvX();
   return JSON.stringify({ app: 'Luma', format: 1, exportedAt: new Date().toISOString(), version: NATIVE ? NATIVE.version() : '',
-    data: { favs: S.favs, history: S.history, seen: S.seen, progress: S.progress, lists: x.lists || [], tvFav: x.tvFav || [], tvStats: x.tvStats || {}, tvCustom: (x.tvCustom || []).filter((e) => e.url), tvLast: x.tvLast || '' }, secrets: S.secrets || {} });
+    data: { favs: S.favs, history: S.history, seen: S.seen, done: S.done, gone: S.gone || {}, progress: S.progress, lists: x.lists || [], tvFav: x.tvFav || [], tvStats: x.tvStats || {}, tvCustom: (x.tvCustom || []).filter((e) => e.url), tvLast: x.tvLast || '' },
+    secrets: S.secrets || {}, sync: S.group ? { gid: S.group.id, gkey: S.group.key } : undefined });
 }
+const syState = () => JSON.stringify([S.history.length, S.favs.length, Object.keys(S.progress).length, Object.values(S.done || {}).reduce((n, a) => n + a.length, 0), Math.max(0, ...S.history.map((h) => h.ts || 0)), Math.max(0, ...Object.values(S.progress).map((p) => p.ts || 0))]);
+/** Приём данных в нашем сервере и сеть: сервер всегда включён, чтобы другие устройства могли нас найти. */
+function syServe() {
+  if (!NATIVE || !NATIVE.syncServe) return;
+  try { NATIVE.syncServe(S.group ? S.group.id : '', S.group ? S.group.key : '', S.did, exportJson()); } catch {}
+}
+function adoptGroup(sy) {
+  if (!sy || !sy.gid || !sy.gkey) return;
+  if (!S.group || sy.gid < S.group.id) { S.group = { id: sy.gid, key: sy.gkey }; save(); syServe(); }
+}
+function applyIncoming(plain, from, quiet) {
+  let obj; try { obj = JSON.parse(plain); } catch { syStatus('Получены повреждённые данные', 'bad'); return false; }
+  const before = syState();
+  adoptGroup(obj.sync);
+  const r = mergeBackup(obj); S.synced = Date.now(); save();
+  mergeDone(obj);
+  try { NATIVE.syncUpdate(exportJson()); } catch {}
+  tmFindCache.clear();
+  const changed = syState() !== before;
+  if (!quiet) syStatus(`Готово: данные получены от ${from || 'устройства'}. Избранное ${S.favs.length}, история ${S.history.length}${r.keys.length ? ', ключей ' + r.keys.length : ''}.`, 'ok');
+  return changed;
+}
+/** «Досмотрено» едет вместе с резервной копией: объединяем списки серий. */
+function mergeDone(obj) {
+  const d = obj.data && obj.data.done; if (!d) return;
+  S.done = S.done || {};
+  for (const [k, arr] of Object.entries(d)) S.done[k] = [...new Set([...(S.done[k] || []), ...arr])];
+  save();
+}
+function syStatus(txt, cls) { SY.status = txt; const e = $('#syStatus'); if (e) { e.textContent = txt; e.className = 'sy-st ' + (cls || ''); } }
+
+/* ---------- автоматический обмен ---------- */
+function autoSync(manual) {
+  if (!NATIVE || !NATIVE.syncAuto) return;
+  if (!S.group) { if (manual) toast('Сначала подключите устройство: «Подключить новое устройство»'); return; }
+  if (SY.auto) return;
+  if (!manual && Date.now() - SY.last < 25000) return;
+  SY.auto = true; SY.last = Date.now();
+  if (manual) syStatus('Ищем устройства в сети…', 'wait');
+  syServe();
+  NATIVE.syncAuto(S.group.key, exportJson());
+}
+window.lumaSyncAuto = (json) => {
+  SY.auto = false; let r = []; try { r = JSON.parse(json); } catch {}
+  let ok = 0, changed = false; const names = [];
+  for (const p of r) {
+    if (p.ok) { ok++; names.push(p.name); if (applyIncoming(p.data, p.name, true)) changed = true; SY.peers = [...SY.peers.filter((x) => x.did !== p.did), { did: p.did, name: p.name, at: Date.now() }]; }
+  }
+  if (ok) syStatus(`Синхронизировано: ${names.join(', ')} · ${new Date().toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' })}`, 'ok');
+  else syStatus(r.length ? 'Устройства найдены, но обменяться не удалось' : 'Других устройств группы в сети нет', r.length ? 'bad' : '');
+  if (changed) { refreshUi(); if (ok > 1 && !SY.again) { SY.again = true; setTimeout(() => { SY.again = false; SY.last = 0; autoSync(false); }, 600); } }
+};
+function refreshUi() { if (typeof NP !== 'undefined' && NP.on) return; if (typeof refreshAfterPlay === 'function') refreshAfterPlay(); }
+window.lumaSyncIn = (plain) => { try { if (applyIncoming(plain, 'устройства', true)) { syStatus('Получены данные от другого устройства', 'ok'); refreshUi(); } } catch {} };
+function takePending() {
+  try { const l = JSON.parse(NATIVE.takeSyncIn()); let ch = false; for (const plain of l) if (applyIncoming(plain, 'устройства', true)) ch = true; if (ch) refreshUi(); } catch {}
+}
+setTimeout(() => { syServe(); takePending(); autoSync(false); }, 2500);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { takePending(); autoSync(false); } });
+setInterval(() => { if (document.visibilityState === 'visible') autoSync(false); }, 5 * 60 * 1000);
+window.syncAfterPlay = () => setTimeout(() => autoSync(false), 2500);
+
+/* ---------- подключение нового устройства (по коду, один раз) ---------- */
 function openSync() {
   const pg = pushPage();
   SY.code = String(1000 + Math.floor(Math.random() * 9000)); SY.found = []; SY.scanning = false; SY.busy = '';
-  let info = {}; try { info = JSON.parse(NATIVE.syncStart(SY.code, exportJson())); } catch {}
-  const ok = !info.error;
-  pg._onClose = () => { try { NATIVE.syncStop(); } catch {} };
+  syServe();
+  try { NATIVE.syncCode(SY.code); } catch {}
+  pg._onClose = () => { try { NATIVE.syncCode(''); } catch {} };
+  const hasG = !!S.group;
   pg.innerHTML = `${backBtn()}<div class="top" style="padding-top:calc(var(--sat) + 62px)"><h1>Синхронизация</h1></div>
-    <div class="sy"><small>Код сопряжения</small><b>${SY.code.split('').join(' ')}</b><p>Введите этот код на компьютере: Luma → Настройки → Телевизор. Данные обменяются в обе стороны и объединятся.</p>
-      <div class="sy-st" id="syStatus">${ok ? 'Телефон виден компьютерам в сети' : 'Не удалось запустить приём. Проверьте подключение к Wi-Fi.'}</div></div>
-    <div class="list" style="margin-top:6px"><button class="li" id="syScan">${ico('refresh')}<div>Найти компьютер<small>Если Luma запущена на ПК в этой же сети</small></div></button></div><div id="syList" class="list" style="margin-top:10px"></div>
-    <p class="about">Последняя синхронизация: ${esc(lastSyncText())}</p>`;
+    <div class="list" style="margin-bottom:6px"><button class="li" id="syNow">${ico('sync')}<div>Синхронизировать сейчас<small>${hasG ? 'С устройствами вашей группы в этой сети' : 'Сначала подключите хотя бы одно устройство'}</small></div></button></div>
+    <div class="sy-st" id="syStatus" style="text-align:center;margin:10px 16px 14px">${esc(SY.status || (hasG ? 'Устройства группы обмениваются сами: при запуске, после просмотра и по кнопке' : ''))}</div>
+    <h3 class="ph3">Подключить новое устройство</h3>
+    <div class="sy"><small>Код этого устройства</small><b>${SY.code.split('').join(' ')}</b><p>Введите его на компьютере (Luma → Настройки → Телевизор) или на другом устройстве. Подключить нужно один раз: дальше они будут синхронизироваться сами.</p></div>
+    <div class="list" style="margin-top:6px"><button class="li" id="syScan">${ico('refresh')}<div>Найти устройство<small>Если Luma запущена на ПК, ТВ или другом телефоне в этой сети</small></div></button></div><div id="syList" class="list" style="margin-top:10px"></div>
+    <p class="about">Последняя синхронизация: ${esc(lastSyncText())}${S.group ? ' · группа ' + esc(S.group.id) : ''}</p>`;
+  $('#syNow', pg).onclick = () => autoSync(true);
   $('#syScan', pg).onclick = () => { if (SY.scanning) return; SY.scanning = true; $('#syList', pg).innerHTML = '<div class="spin"></div>'; NATIVE.syncScan(); };
 }
-const syStatus = (txt, cls) => { const e = $('#syStatus'); if (e) { e.textContent = txt; e.className = 'sy-st ' + (cls || ''); } };
 window.lumaSyncFound = (json) => {
   SY.scanning = false; let list = []; try { list = JSON.parse(json); } catch {}
   SY.found = list; const box = $('#syList'); if (!box) return;
-  box.innerHTML = list.length ? list.map((p, i) => `<button class="li" data-sypc="${i}">${ico('tv')}<div>${esc(p.name || 'Компьютер')}<small>${esc(p.ip)}</small></div></button>`).join('')
-    : '<div class="empty"><h3>Компьютеры не нашлись</h3><p>Запустите Luma на ПК (он должен быть в той же сети) или откройте на ПК Настройки → Телевизор и найдите этот телефон.</p></div>';
+  box.innerHTML = list.length ? list.map((p, i) => `<button class="li" data-sypc="${i}">${ico('tv')}<div>${esc(p.name || 'Устройство')}<small>${esc(p.ip)}</small></div></button>`).join('')
+    : '<div class="empty"><h3>Устройства не нашлись</h3><p>Запустите Luma на втором устройстве (оно должно быть в той же сети).</p></div>';
   $$('[data-sypc]', box).forEach((b) => (b.onclick = () => sendTo(+b.dataset.sypc)));
 };
 function sendTo(i) {
   const p = SY.found[i]; if (!p || SY.busy) return;
-  SY.busy = p.ip; syStatus(`Ждём подтверждения на компьютере «${p.name}»: введите там код ${SY.code}`, 'wait');
-  NATIVE.syncSend(p.ip, p.port, SY.code, exportJson());
+  const go = (code) => {
+    ensureGroup(); syServe();
+    SY.busy = p.ip;
+    syStatus(p.app === 'luma-tv' ? `Подключаемся к «${p.name}»…` : `Ждём подтверждения на устройстве «${p.name}»: введите там код ${SY.code}`, 'wait');
+    NATIVE.syncSend(p.ip, p.port, code, exportJson());
+  };
+  // компьютер сам спросит наш код; телефон или ТВ код не спрашивают, поэтому его вводим здесь (он показан на экране того устройства)
+  if (p.app !== 'luma-tv') { go(SY.code); return; }
+  const sh = openSheet(`<h3>Код устройства «${esc(p.name)}»</h3><p class="sub">Введите 4 цифры с экрана этого устройства (раздел «Синхронизация»).</p><input id="scode" inputmode="numeric" maxlength="4" placeholder="0000" autocomplete="off"><div class="dbtns"><button class="btn primary" id="sgo">Подключить</button></div>`);
+  $('#sgo', sh).onclick = () => { const c = $('#scode', sh).value.trim(); if (!/^\d{4}$/.test(c)) { $('#scode', sh).focus(); return; } closeSheet(); go(c); };
+  setTimeout(() => $('#scode', sh).focus(), 300);
 }
 window.lumaSyncDone = (json) => {
   SY.busy = ''; let r = {}; try { r = JSON.parse(json); } catch {}
-  if (r.ok) applyIncoming(r.data, r.name);
-  else syStatus({ BAD_CODE: 'Код не подошёл. Введите на компьютере код с экрана телефона.', TIMEOUT: 'Компьютер не ответил вовремя.', NETWORK: 'Не получилось связаться с компьютером.' }[r.error] || 'Не получилось синхронизироваться.', 'bad');
+  if (r.ok) { applyIncoming(r.data, r.name); toast('Устройство подключено'); setTimeout(() => autoSync(true), 800); }
+  else syStatus({ BAD_CODE: 'Код не подошёл. Введите код с экрана этого устройства.', TIMEOUT: 'Устройство не ответило вовремя.', NETWORK: 'Не получилось связаться с устройством.' }[r.error] || 'Не получилось подключиться.', 'bad');
 };
-window.lumaSyncIn = (plain) => { try { applyIncoming(plain, 'компьютера'); } catch {} };
-function applyIncoming(plain, from) {
-  let obj; try { obj = JSON.parse(plain); } catch { syStatus('Получены повреждённые данные', 'bad'); return; }
-  const r = mergeBackup(obj); S.synced = Date.now(); save();
-  syStatus(`Готово: данные получены от ${from || 'компьютера'}. Избранное ${S.favs.length}, история ${S.history.length}${r.keys.length ? ', ключей ' + r.keys.length : ''}.`, 'ok');
-  toast('Синхронизация завершена');
-  try { NATIVE.syncUpdate(exportJson()); } catch {}
-  tmFindCache.clear();
-}
 
 /* ---------- экран настроек ---------- */
 function settingsHtml() {
@@ -135,7 +209,7 @@ function settingsHtml() {
   const [uh, us] = updText();
   return `<h3 class="ph3" style="padding-left:0">Сервисы</h3><div class="list" style="padding:0">${['tmdb', 'omdb', 'mdblist', 'trakt'].map(keyRow).join('')}</div>
     <h3 class="ph3" style="padding-left:0;margin-top:14px">Данные</h3><div class="list" style="padding:0">
-      <button class="li" id="syncRow">${ico('sync')}<div>Синхронизация<small>С компьютером и ТВ · последняя: ${esc(lastSyncText())}</small></div></button>
+      <button class="li" id="syncRow">${ico('sync')}<div>Синхронизация<small>${S.group ? 'Группа устройств подключена' : 'Не подключено'} · последняя: ${esc(lastSyncText())}</small></div></button>
       <button class="li" id="clr">${ico('trash')}<div>Очистить историю<small>Список «Продолжить просмотр» и отметки серий</small></div></button></div>
     <h3 class="ph3" style="padding-left:0;margin-top:14px">Приложение</h3><div class="list" style="padding:0">
       <button class="li" id="updRow" data-act="updcheck">${ico('info')}<div>${esc(uh)}<small>${esc(us)}</small></div></button></div>
@@ -144,7 +218,7 @@ function settingsHtml() {
 function bindSettings(root) {
   $$('[data-key]', root).forEach((b) => (b.onclick = () => keyDlg(b.dataset.key)));
   $('#syncRow', root).onclick = openSync;
-  $('#clr', root).onclick = () => { S.history = []; S.progress = {}; S.seen = {}; S.done = {}; save(); toast('История очищена'); };
+  $('#clr', root).onclick = () => { S.history.forEach((h) => goneMark('h', h.id)); S.history = []; S.progress = {}; S.seen = {}; S.done = {}; save(); toast('История очищена'); };
   $('#updRow', root).onclick = (e) => { const a = e.currentTarget.dataset.act; if (a === 'updinstall') updInstall(); else updCheck(false); };
 }
 setTimeout(() => { updCheck(true); setInterval(() => updCheck(true), 6 * 3600e3); }, 15000);

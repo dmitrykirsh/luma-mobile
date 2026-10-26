@@ -92,6 +92,7 @@ function npClose(silent) {
   if (!NP.on) return;
   try { if (NP.st.d > 120000) storeProgress(NP.key, NP.st.p / 1000, NP.st.d / 1000); } catch {}
   NP.on = false; NP.token++; clearTimeout(NP.uiT); tvClean();
+  try { if (window.syncAfterPlay) syncAfterPlay(); } catch {}
   try { NATIVE.npStop(); NATIVE.playerMode(false); } catch {}
   document.body.classList.remove('np'); document.documentElement.classList.remove('np');
   $('#np').classList.add('hidden'); closeMenu();

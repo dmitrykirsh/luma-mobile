@@ -2,6 +2,7 @@ package ws.luma.mobile
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.graphics.Color
@@ -109,6 +110,7 @@ class MainActivity : Activity() {
         setContentView(rootLayout)
         np = NativePlayer(this, rootLayout) { code -> js(code) }
         syncNet = SyncNet { code -> js(code) }
+        if (!(getSharedPreferences("sync", Context.MODE_PRIVATE).getString("gid", "")).isNullOrEmpty()) SyncJob.schedule(this, true)   // фоновая синхронизация переживает перезапуск приложения
         web.loadUrl("https://liftw.ws/index.html")
     }
 
@@ -205,19 +207,40 @@ class MainActivity : Activity() {
             }.start()
         }
 
-        // синхронизация с компьютером и ТВ
-        @JavascriptInterface fun syncStart(code: String, exportJson: String): String {
-            syncStop()
-            val name = try { android.provider.Settings.Global.getString(contentResolver, "device_name") } catch (_: Exception) { null } ?: Build.MODEL
-            val srv = ImportServer({}, {})
-            srv.syncCode = code; srv.syncExport = exportJson; srv.deviceName = name
-            srv.onSyncIn = { plain -> js("window.lumaSyncIn && window.lumaSyncIn(" + JSONObject.quote(plain) + ")") }
-            return try { val port = srv.start(); syncSrv = srv; syncNet.startResponder(name, port); JSONObject().put("name", name).put("port", port).toString() } catch (_: Exception) { "{\"error\":\"PORT\"}" }
+        // синхронизация между устройствами: приём всегда включён, обмен по ключу группы, код нужен только для первого подключения
+        private fun saveSnap(gid: String, gkey: String, did: String, snap: String) {
+            getSharedPreferences("sync", Context.MODE_PRIVATE).edit().putString("gid", gid).putString("gkey", gkey).putString("did", did).putString("snap", snap).apply()
         }
-        @JavascriptInterface fun syncUpdate(exportJson: String) { syncSrv?.syncExport = exportJson }
+        @JavascriptInterface fun syncServe(gid: String, gkey: String, did: String, exportJson: String): String {
+            val name = try { android.provider.Settings.Global.getString(contentResolver, "device_name") } catch (_: Exception) { null } ?: Build.MODEL
+            syncNet.gid = gid; syncNet.did = did
+            saveSnap(gid, gkey, did, exportJson)
+            var srv = syncSrv
+            if (srv == null) {
+                srv = ImportServer({}, {})
+                srv.onSyncIn = { plain -> js("window.lumaSyncIn && window.lumaSyncIn(" + JSONObject.quote(plain) + ")") }
+                try { val port = srv.start(); syncSrv = srv; srv.deviceName = name; syncNet.startResponder(name, port) } catch (_: Exception) { return "{\"error\":\"PORT\"}" }
+            }
+            srv.deviceName = name; srv.groupId = gid; srv.groupKey = gkey; srv.syncExport = exportJson
+            SyncJob.schedule(this@MainActivity, gid.isNotEmpty())
+            return JSONObject().put("name", name).put("port", srv.port).toString()
+        }
+        @JavascriptInterface fun syncCode(code: String) { syncSrv?.syncCode = code.ifEmpty { null } }
+        @JavascriptInterface fun syncUpdate(exportJson: String) {
+            syncSrv?.syncExport = exportJson
+            getSharedPreferences("sync", Context.MODE_PRIVATE).edit().putString("snap", exportJson).apply()
+        }
         @JavascriptInterface fun syncStop() { syncNet.stopResponder(); syncSrv?.stop(); syncSrv = null }
         @JavascriptInterface fun syncScan() { syncNet.scan() }
         @JavascriptInterface fun syncSend(ip: String, port: Int, code: String, exportJson: String) { syncNet.send(ip, port, code, exportJson) }
+        @JavascriptInterface fun syncAuto(gkey: String, exportJson: String) { syncNet.autoAsync(gkey, exportJson) }
+        /** Данные, которые фоновая задача получила от других устройств, пока приложение было закрыто (массив JSON-строк). */
+        @JavascriptInterface fun takeSyncIn(): String {
+            val p = getSharedPreferences("sync", Context.MODE_PRIVATE)
+            val v = p.getString("pending", "[]") ?: "[]"
+            p.edit().remove("pending").apply()
+            return v
+        }
 
         // нативный плеер: все вызовы из JS переносим в главный поток
         @JavascriptInterface fun npStart(json: String) { runOnUiThread { try { np.start(json) } catch (e: Exception) { js("window.npEvent && window.npEvent('error'," + JSONObject.quote(e.toString()) + ")") } } }
