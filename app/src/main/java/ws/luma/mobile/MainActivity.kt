@@ -33,6 +33,8 @@ class MainActivity : Activity() {
     private lateinit var net: NetProxy
     private lateinit var rootLayout: FrameLayout
     private lateinit var np: NativePlayer
+    private lateinit var syncNet: SyncNet
+    private var syncSrv: ImportServer? = null
     private var pendingLink = ""
 
     private val loader by lazy {
@@ -106,6 +108,7 @@ class MainActivity : Activity() {
         rootLayout = FrameLayout(this).apply { setBackgroundColor(Color.BLACK); addView(web, FrameLayout.LayoutParams(-1, -1)) }
         setContentView(rootLayout)
         np = NativePlayer(this, rootLayout) { code -> js(code) }
+        syncNet = SyncNet { code -> js(code) }
         web.loadUrl("https://liftw.ws/index.html")
     }
 
@@ -116,7 +119,7 @@ class MainActivity : Activity() {
         web.evaluateJavascript("window.lumaBack ? window.lumaBack() : false") { r -> if (r != "true") finish() }
     }
 
-    override fun onDestroy() { try { np.stop() } catch (_: Exception) {}; web.destroy(); super.onDestroy() }
+    override fun onDestroy() { try { np.stop(); syncNet.stopResponder(); syncSrv?.stop() } catch (_: Exception) {}; web.destroy(); super.onDestroy() }
 
     private fun js(code: String) = runOnUiThread { web.evaluateJavascript(code, null) }
 
@@ -181,6 +184,40 @@ class MainActivity : Activity() {
             val am = getSystemService(AUDIO_SERVICE) as AudioManager
             return am.getStreamVolume(AudioManager.STREAM_MUSIC).toDouble() / am.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
         }
+
+
+        /** Скачивает APK обновления и открывает установщик Android. Состояние уходит в window.lumaUpdateState. */
+        @JavascriptInterface fun installUpdate(url: String) {
+            Thread {
+                try {
+                    val f = java.io.File(cacheDir, "updates/luma-mobile-update.apk")
+                    net.download(url, f) { p -> js("window.lumaUpdateState && window.lumaUpdateState({state:'downloading',pct:$p})") }
+                    if (!packageManager.canRequestPackageInstalls()) {
+                        js("window.lumaUpdateState && window.lumaUpdateState({state:'needperm'})")
+                        runOnUiThread { try { startActivity(Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName"))) } catch (_: Exception) {} }
+                        return@Thread
+                    }
+                    val uri = androidx.core.content.FileProvider.getUriForFile(this@MainActivity, "$packageName.files", f)
+                    val i = Intent(Intent.ACTION_VIEW).setDataAndType(uri, "application/vnd.android.package-archive").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                    js("window.lumaUpdateState && window.lumaUpdateState({state:'installing'})")
+                    runOnUiThread { startActivity(i) }
+                } catch (e: Exception) { js("window.lumaUpdateState && window.lumaUpdateState({state:'error',msg:" + JSONObject.quote(e.message ?: "error") + "})") }
+            }.start()
+        }
+
+        // синхронизация с компьютером и ТВ
+        @JavascriptInterface fun syncStart(code: String, exportJson: String): String {
+            syncStop()
+            val name = try { android.provider.Settings.Global.getString(contentResolver, "device_name") } catch (_: Exception) { null } ?: Build.MODEL
+            val srv = ImportServer({}, {})
+            srv.syncCode = code; srv.syncExport = exportJson; srv.deviceName = name
+            srv.onSyncIn = { plain -> js("window.lumaSyncIn && window.lumaSyncIn(" + JSONObject.quote(plain) + ")") }
+            return try { val port = srv.start(); syncSrv = srv; syncNet.startResponder(name, port); JSONObject().put("name", name).put("port", port).toString() } catch (_: Exception) { "{\"error\":\"PORT\"}" }
+        }
+        @JavascriptInterface fun syncUpdate(exportJson: String) { syncSrv?.syncExport = exportJson }
+        @JavascriptInterface fun syncStop() { syncNet.stopResponder(); syncSrv?.stop(); syncSrv = null }
+        @JavascriptInterface fun syncScan() { syncNet.scan() }
+        @JavascriptInterface fun syncSend(ip: String, port: Int, code: String, exportJson: String) { syncNet.send(ip, port, code, exportJson) }
 
         // нативный плеер: все вызовы из JS переносим в главный поток
         @JavascriptInterface fun npStart(json: String) { runOnUiThread { try { np.start(json) } catch (e: Exception) { js("window.npEvent && window.npEvent('error'," + JSONObject.quote(e.toString()) + ")") } } }

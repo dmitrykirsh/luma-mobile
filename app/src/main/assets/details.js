@@ -13,6 +13,7 @@ function pushPage() {
 }
 function popPage() {
   const el = PG.pop(); if (!el) return false;
+  if (el._onClose) { try { el._onClose(); } catch {} }
   el.classList.add('out'); setTimeout(() => el.remove(), 260);
   if (!PG.length) document.body.classList.remove('pgs');
   return true;

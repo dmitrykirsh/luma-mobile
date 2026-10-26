@@ -16,9 +16,13 @@ const ICONS = {
   back: '<path d="M15 5l-7 7 7 7"/>',
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>',
+  key: '<circle cx="8" cy="15" r="4"/><path d="M11 12l8-8M16 7l3 3M14 9l2 2"/>',
+  sync: '<path d="M4 12a8 8 0 0 1 13.700-5.600L20 8.500M20 4v4.500h-4.500M20 12a8 8 0 0 1-13.700 5.600L4 15.500M4 20v-4.500h4.500"/>',
+  refresh: '<path d="M20 12a8 8 0 1 1-2.500-5.800M20 4v5h-5"/>',
   restart: '<path d="M4 12a8 8 0 1 1 2.500 5.800M4 20v-5h5"/>',
   tv: '<rect x="3" y="5" width="18" height="12" rx="2"/><path d="M8 21h8M12 17v4"/>',
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/>',
+  list: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
   trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-12M9 7V4h6v3"/>'
 };
 const ico = (n, cls = '') => `<svg viewBox="0 0 24 24" class="${cls}">${ICONS[n]}</svg>`;
@@ -176,6 +180,7 @@ async function renderHome(t) {
     hero.onscroll = () => { const i = Math.round(hero.scrollLeft / (hero.firstElementChild.offsetWidth + 12)); dots.forEach((d, k) => d.classList.toggle('on', k === i)); };
   })();
   const rows = [['tm0', '/trending/movie/week', {}, 'movie'], ['tm1', '/trending/tv/week', {}, 'tv'], ['tm2', '/movie/now_playing', { region: 'RU' }, 'movie'], ['tm3', '/movie/top_rated', {}, 'movie'], ['tm4', '/movie/upcoming', { region: 'RU' }, 'movie']];
+  homeHoliday(t);
   (async () => { for (const [id, p, q, k] of rows) { try { const r = await tmRow(p, q, k); if (alive(t)) fillRow(id, r.map((x) => x.it)); } catch {} } })();
 }
 
@@ -184,11 +189,12 @@ const GENRES = ['Боевик', 'Комедия', 'Драма', 'Триллер'
 let catState = { cat: 0, sort: 0, genre: '', page: 1, busy: false, end: false };
 async function renderCat(t) {
   const view = $('#view');
-  view.innerHTML = `<div class="top"><h1>Каталог</h1></div><div class="chips" id="cc">${CATS.map(([, l], i) => `<button class="chip ${i === catState.cat ? 'on' : ''}" data-c="${i}">${l}</button>`).join('')}</div>
+  view.innerHTML = `<div class="top"><h1>Каталог</h1><button class="chip" id="openLists">${ico('list')} Подборки</button></div><div class="chips" id="cc">${CATS.map(([, l], i) => `<button class="chip ${i === catState.cat ? 'on' : ''}" data-c="${i}">${l}</button>`).join('')}</div>
     <div class="chips" id="cs">${SORTS.map(([, l], i) => `<button class="chip ${i === catState.sort ? 'on' : ''}" data-s="${i}">${l}</button>`).join('')}</div>
     <div class="chips" id="cg2"><button class="chip ${catState.genre ? '' : 'on'}" data-g="">Все жанры</button>${GENRES.map((g) => `<button class="chip ${catState.genre === g ? 'on' : ''}" data-g="${g}">${g}</button>`).join('')}</div>
     <div class="grid" id="cg"></div><div id="cm"></div>`;
   catState.page = 1; catState.end = false; catState.busy = false;
+  $('#openLists').onclick = openLists;
   $('#cc').onclick = (e) => { const b = e.target.closest('[data-c]'); if (b) { catState.cat = +b.dataset.c; renderTab(); } };
   $('#cs').onclick = (e) => { const b = e.target.closest('[data-s]'); if (b) { catState.sort = +b.dataset.s; renderTab(); } };
   $('#cg2').onclick = (e) => { const b = e.target.closest('[data-g]'); if (b) { catState.genre = b.dataset.g; renderTab(); } };
@@ -219,6 +225,7 @@ function renderSearch(t) {
     const v = q.value.trim(); lastQ = v;
     if (v.length < 2) { $('#sr').innerHTML = ''; return; }
     $('#sr').innerHTML = '<div class="spin"></div>';
+    peopleSearch(v).then((pp) => { if (!alive(t) || q.value.trim() !== v || !pp.length) return; $('#sr').insertAdjacentHTML('afterbegin', `<h3 class="ph3">Люди</h3><div class="people" id="pplRow">${pp.map((x) => `<button class="person" data-tm="${x.id}"><div class="pha">${x.photo ? `<img loading="lazy" src="${esc(x.photo)}" alt="" onerror="this.remove()">` : ''}<span>${esc([...(x.name || '?')][0])}</span></div><b>${esc(x.name)}</b><small>${esc(x.dept)}</small></button>`).join('')}</div>`); $$('#pplRow .person').forEach((b) => (b.onclick = () => openPerson({ tmdb: b.dataset.tm }))); }).catch(() => {});
     try { const r = await search(v); if (!alive(t) || q.value.trim() !== v) return; $('#sr').innerHTML = r.length ? `<div class="grid">${r.map(card).join('')}</div>` : '<div class="empty"><h3>Ничего не нашлось</h3><p>Попробуйте другое название.</p></div>'; }
     catch { if (alive(t)) $('#sr').innerHTML = '<div class="empty"><h3>Нет связи</h3></div>'; }
   };
@@ -231,16 +238,32 @@ let mineTab = 'favs';
 function renderMine(t) {
   const view = $('#view'); view.onscroll = null;
   const list = mineTab === 'favs' ? S.favs : S.history;
-  view.innerHTML = `<div class="top"><h1>Моё</h1></div><div class="chips" id="mt"><button class="chip ${mineTab === 'favs' ? 'on' : ''}" data-m="favs">Избранное</button><button class="chip ${mineTab === 'hist' ? 'on' : ''}" data-m="hist">История</button><button class="chip ${mineTab === 'app' ? 'on' : ''}" data-m="app">О приложении</button></div>
-    <div id="mb">${mineTab === 'app' ? `<div class="list"><div class="li">${ico('info')}<div>Luma для телефона<small>Версия ${esc(NATIVE ? NATIVE.version() : '—')}</small></div></div>
-      <button class="li" id="clr">${ico('trash')}<div>Очистить историю<small>Список «Продолжить просмотр» и отметки серий</small></div></button></div>`
-      : list.length ? `<div class="grid">${list.map(card).join('')}</div>` : `<div class="empty"><h3>${mineTab === 'favs' ? 'Пока пусто' : 'История пуста'}</h3><p>${mineTab === 'favs' ? 'Нажмите ♥ на странице фильма, чтобы он появился здесь.' : 'Здесь будет всё, что вы смотрели.'}</p></div>`}</div>`;
+  const body = mineTab === 'set' ? `<div style="padding:0 16px">${settingsHtml()}</div>`
+    : list.length ? `<div class="grid">${list.map(card).join('')}</div>` : `<div class="empty"><h3>${mineTab === 'favs' ? 'Пока пусто' : 'История пуста'}</h3><p>${mineTab === 'favs' ? 'Нажмите ♥ на странице фильма, чтобы он появился здесь.' : 'Здесь будет всё, что вы смотрели.'}</p></div>`;
+  view.innerHTML = `<div class="top"><h1>Моё</h1></div><div class="chips" id="mt"><button class="chip ${mineTab === 'favs' ? 'on' : ''}" data-m="favs">Избранное</button><button class="chip ${mineTab === 'hist' ? 'on' : ''}" data-m="hist">История</button><button class="chip ${mineTab === 'set' ? 'on' : ''}" data-m="set">Настройки</button></div><div id="mb">${body}</div>`;
   $('#mt').onclick = (e) => { const b = e.target.closest('[data-m]'); if (b) { mineTab = b.dataset.m; renderTab(); } };
-  $('#clr')?.addEventListener('click', () => { S.history = []; S.progress = {}; S.seen = {}; S.done = {}; save(); toast('История очищена'); });
+  if (mineTab === 'set') bindSettings($('#mb'));
 }
 
-/** После просмотра обновляем страницу фильма (кнопка «Продолжить», отметки серий) и главную. */
-function refreshAfterPlay() { PG.forEach((el) => el._x && el._x.refresh && el._x.refresh()); if (tab === 'home') { const y = $('#view').scrollTop; renderTab(); setTimeout(() => ($('#view').scrollTop = y), 50); } }
+/* ---------- долгое нажатие на «Продолжить просмотр»: убрать из списка ---------- */
+(() => {
+  let tm = 0, held = false, sx = 0, sy = 0;
+  const cancel = () => clearTimeout(tm);
+  document.addEventListener('pointerdown', (e) => {
+    const c = e.target.closest('.cw'); if (!c) return;
+    held = false; sx = e.clientX; sy = e.clientY;
+    tm = setTimeout(() => {
+      held = true; c.classList.add('held');
+      const id = +c.dataset.id, h = S.history.find((x) => x.id === id); if (!h) return;
+      const sh = openSheet(`<h3>${esc(h.name)}</h3><p class="sub">Убрать из списка «Продолжить просмотр»?</p><div class="dbtns"><button class="btn primary" id="hdel">Убрать</button><button class="btn" id="hno">Отмена</button></div>`);
+      $('#hno', sh).onclick = closeSheet;
+      $('#hdel', sh).onclick = () => { S.history = S.history.filter((x) => x.id !== id); save(); closeSheet(); toast('Убрано из списка'); if (tab === 'home') renderTab(); };
+    }, 550);
+  });
+  document.addEventListener('pointermove', (e) => { if (Math.abs(e.clientX - sx) > 10 || Math.abs(e.clientY - sy) > 10) cancel(); });
+  document.addEventListener('pointerup', cancel); document.addEventListener('pointercancel', cancel);
+  document.addEventListener('click', (e) => { if (held) { held = false; e.stopPropagation(); e.preventDefault(); } }, true);
+})();
 
 /* ---------- нажатия ---------- */
 document.addEventListener('click', (e) => {
@@ -251,6 +274,7 @@ document.addEventListener('click', (e) => {
 /* ---------- кнопка «Назад» ---------- */
 window.lumaBack = () => {
   if (window.npBack && window.npBack()) return true;
+  if (window.sheetBack && window.sheetBack()) return true;
   if (PG.length) { popPage(); return true; }
   if (tab !== 'home') { switchTab('home'); return true; }
   return false;

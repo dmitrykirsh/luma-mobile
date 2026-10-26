@@ -74,7 +74,20 @@ async function playItem(d, seasons, season, episode, opts = {}) {
   urls.push(src.hls);
   NATIVE.npStart(JSON.stringify({ url: urls[0], urls, ua: NP_UA, referer: 'https://liftw.ws/', startMs: resume ? Math.floor(resume.t * 1000) : 0, subs }));
 }
-function npFail(msg) { toast(msg); npClose(true); }
+function npFail(msg) {
+  const d = NP.d;
+  if (NP.live || !d || !d.iframe_uri) { toast(msg); npClose(true); return; }
+  toast(msg + ' — открываем плеер сайта'); npClose(true); openEmbed(d, NP.season, NP.episode);
+}
+/** Запасной вариант: родной плеер сайта в рамке на весь экран (ландшафт), если поток не удалось получить. */
+function openEmbed(d, season, episode) {
+  const pg = pushPage(); pg.classList.add('embed');
+  let url = d.iframe_uri || '';
+  try { const u = new URL(url); if (season) { u.searchParams.set('season', season); u.searchParams.set('episode', episode); } url = u.toString(); } catch {}
+  pg.innerHTML = `${backBtn()}<iframe allow="autoplay; fullscreen; encrypted-media" allowfullscreen src="${esc(url)}"></iframe>`;
+  pg._onClose = () => { try { NATIVE.playerMode(false); } catch {} };
+  try { NATIVE.playerMode(true); } catch {}
+}
 function npClose(silent) {
   if (!NP.on) return;
   try { if (NP.st.d > 120000) storeProgress(NP.key, NP.st.p / 1000, NP.st.d / 1000); } catch {}
