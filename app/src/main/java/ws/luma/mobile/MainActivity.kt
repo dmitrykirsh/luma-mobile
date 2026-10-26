@@ -93,6 +93,8 @@ class MainActivity : Activity() {
             webViewClient = object : WebViewClient() {
                 override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
                     val rh = request.url.host ?: ""
+                    // лишние запросы плеера сайта: пиксели статистики и загрузчик рекламных XML (preroll). Отвечаем пустым «не найдено», плеер просто идёт без рекламы
+                    if (rh == "s.namy.ws" || rh == "vuegenesisvue.com" || rh.endsWith(".vuegenesisvue.com")) return WebResourceResponse("text/plain", "utf-8", 404, "Not Found", mapOf("Access-Control-Allow-Origin" to "*"), java.io.ByteArrayInputStream(ByteArray(0)))
                     if (request.method == "GET" && (rh.endsWith("ytimg.com") || rh.endsWith("ggpht.com"))) return ytImage(request)
                     if (net.handles(request)) return net.serve(request)
                     return loader.shouldInterceptRequest(request.url)
