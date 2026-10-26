@@ -30,14 +30,14 @@ function npDom() {
     <div class="np-skip hidden"><button id="npSkip"><span></span></button></div>
     <div class="np-bot"><div class="np-seek" id="npSeek"><div class="np-thumb hidden"><div class="img"></div><span></span></div><div class="rail"><i class="pos"></i></div><b class="knob"></b></div>
       <div class="np-times"><span class="t0">0:00</span><span class="t1">0:00</span></div>
-      <div class="np-chips"><button data-m="eps">Серии</button><button data-m="audio">Звук</button><button data-m="subs">Субтитры</button><button data-m="quality">Качество</button><button data-m="speed">Скорость</button></div></div>
+      <div class="np-chips"><button class="lv" data-m="prog">Программа</button><button class="lv" data-m="list">Каналы</button><button class="lv" data-m="src">Источник</button><button class="lv" data-m="star">☆ В избранное</button><button class="vod" data-m="eps">Серии</button><button data-m="audio">Звук</button><button class="vod" data-m="subs">Субтитры</button><button data-m="quality">Качество</button><button class="vod" data-m="speed">Скорость</button></div></div>
     <div class="np-menu hidden" id="npMenu"></div>`;
   $('#npBack').onclick = () => npClose();
   $('#npToggle').onclick = () => { NATIVE.npCmd('toggle', 0); npUi(3500); };
-  $('#npPrev').onclick = () => npNext(-1);
-  $('#npNext').onclick = () => npNext(1);
+  $('#npPrev').onclick = () => (NP.live ? tvZap(-1) : npNext(-1));
+  $('#npNext').onclick = () => (NP.live ? tvZap(1) : npNext(1));
   $('#npSkip').onclick = () => npDoSkip();
-  $$('.np-chips button').forEach((b) => (b.onclick = () => openMenu(b.dataset.m)));
+  $$('.np-chips button').forEach((b) => (b.onclick = () => (NP.live && ['star', 'src'].includes(b.dataset.m) ? tvChip(b.dataset.m) : openMenu(b.dataset.m))));
   bindTouch(); bindSeek();
   $('#npMenu').addEventListener('click', onMenuClick);
 }
@@ -48,8 +48,8 @@ async function playItem(d, seasons, season, episode, opts = {}) {
   const token = ++NP.token;
   Object.assign(NP, { on: true, d, seasons, season, episode, key, tr: null, secs: [], menu: '', st: { p: 0, d: 0, pl: false, b: true, w: true }, lastSave: 0, subApplied: '', scrub: null, skipSec: null });
   addHistory(d, season, episode);
-  npDom();
-  const el = $('#np'); el.classList.remove('hidden'); document.body.classList.add('np'); document.documentElement.classList.add('np');
+  npDom(); NP.live = null; clearInterval(TVD.timers.count); clearInterval(TVD.timers.head);
+  const el = $('#np'); el.classList.remove('live'); el.classList.remove('hidden'); document.body.classList.add('np'); document.documentElement.classList.add('np');
   npApplySubSize(); npSubLast = null; window.npCue('');
   try { NATIVE.playerMode(true); } catch {}
   $('#np .np-load').classList.remove('hidden');
@@ -78,7 +78,7 @@ function npFail(msg) { toast(msg); npClose(true); }
 function npClose(silent) {
   if (!NP.on) return;
   try { if (NP.st.d > 120000) storeProgress(NP.key, NP.st.p / 1000, NP.st.d / 1000); } catch {}
-  NP.on = false; NP.token++; clearTimeout(NP.uiT);
+  NP.on = false; NP.token++; clearTimeout(NP.uiT); tvClean();
   try { NATIVE.npStop(); NATIVE.playerMode(false); } catch {}
   document.body.classList.remove('np'); document.documentElement.classList.remove('np');
   $('#np').classList.add('hidden'); closeMenu();
@@ -101,6 +101,7 @@ window.npState = (s) => {
 };
 window.npEvent = (ev, msg) => {
   if (!NP.on) return;
+  if (NP.live) { tvEvent(ev, msg); return; }
   if (ev === 'ready') { $('#np .np-load').classList.add('hidden'); npApplyPrefs(); }
   else if (ev === 'ended') { storeProgress(NP.key, 1e9, 1e9); if (!npNext(1)) npClose(); }
   else if (ev === 'fallback') toast('Видео 1080p не запустилось, включаем обычный поток');
@@ -267,6 +268,7 @@ function openMenu(kind) { NP.menu = kind; clearTimeout(NP.uiT); $('#npMenu').cla
 function closeMenu() { NP.menu = ''; const m = $('#npMenu'); if (m) { m.classList.add('hidden'); m.innerHTML = ''; } if (NP.on) npUi(3000); }
 function renderMenu() {
   const box = $('#npMenu'); if (!box || !NP.menu) return;
+  if (NP.live && (NP.menu === 'prog' || NP.menu === 'list')) { const m = tvMenu(NP.menu); box.innerHTML = `<h3>${esc(m.title)}</h3><div class="ml">${m.html}</div>`; const cur = $('.mr.on', box); if (cur) cur.scrollIntoView({ block: 'center' }); return; }
   let tr = {}; try { tr = JSON.parse(NATIVE.npTracks()); } catch {}
   const row = (label, sel, attrs, sub) => `<button class="mr ${sel ? 'on' : ''}" ${attrs}><i>${sel ? NPI.check : ''}</i><span>${esc(label)}</span>${sub ? `<small>${esc(sub)}</small>` : ''}</button>`;
   let html = '', title = '';
@@ -296,6 +298,7 @@ function renderMenu() {
 }
 function onMenuClick(e) {
   const el = e.target.closest('button'); if (!el) return;
+  if (el.dataset.tvplay) { const c = tvChan(el.dataset.tvplay); closeMenu(); if (c) tvPlay(c); return; }
   if (el.dataset.nsize) { npPrefs().subSize = el.dataset.nsize; save(); npApplySubSize(); renderMenu(); return; }
   if (el.dataset.nsel) {
     NATIVE.npSelect(el.dataset.nsel, +el.dataset.g, +el.dataset.t);
@@ -313,7 +316,7 @@ async function playTrailer(t) {
   if (!NATIVE || !NATIVE.npStart) { toast('Плеер недоступен'); return; }
   const token = ++NP.token;
   Object.assign(NP, { on: true, d: { id: -1, name: t.title }, seasons: [], season: null, episode: null, key: '', tr: null, secs: [], menu: '', st: { p: 0, d: 0, pl: false, b: true, w: true }, lastSave: 0, subApplied: '1', audioNames: [], scrub: null, skipSec: null });
-  npDom();
+  npDom(); tvClean(); $('#np').classList.remove('live');
   $('#np').classList.remove('hidden'); document.body.classList.add('np'); document.documentElement.classList.add('np');
   npApplySubSize(); npSubLast = null; window.npCue('');
   try { NATIVE.playerMode(true); } catch {}

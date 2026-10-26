@@ -17,6 +17,8 @@ const ICONS = {
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>',
   restart: '<path d="M4 12a8 8 0 1 1 2.500 5.800M4 20v-5h5"/>',
+  tv: '<rect x="3" y="5" width="18" height="12" rx="2"/><path d="M8 21h8M12 17v4"/>',
+  globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/>',
   trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-12M9 7V4h6v3"/>'
 };
 const ico = (n, cls = '') => `<svg viewBox="0 0 24 24" class="${cls}">${ICONS[n]}</svg>`;
@@ -119,7 +121,7 @@ const rowOf = (items) => `<div class="row">${items.map(card).join('')}</div>`;
 const skeleton = () => '<div class="sk"></div><div class="sk"></div><div class="sk"></div>';
 
 /* ---------- вкладки ---------- */
-const TABS = [['home', 'Главная', 'home'], ['cat', 'Каталог', 'grid'], ['search', 'Поиск', 'search'], ['mine', 'Моё', 'user']];
+const TABS = [['home', 'Главная', 'home'], ['cat', 'Каталог', 'grid'], ['tv', 'ТВ', 'tv'], ['search', 'Поиск', 'search'], ['mine', 'Моё', 'user']];
 let tab = 'home', scrollPos = {}, token = 0;
 function buildTabs() {
   $('#tabs').innerHTML = TABS.map(([k, l, i]) => `<button data-t="${k}" class="${k === tab ? 'on' : ''}">${ico(i)}<span>${l}</span></button>`).join('');
@@ -129,7 +131,7 @@ function switchTab(k, top) {
   scrollPos[tab] = $('#view').scrollTop; tab = k; buildTabs();
   renderTab(); $('#view').scrollTop = top ? 0 : (scrollPos[k] || 0);
 }
-function renderTab() { const t = ++token; ({ home: renderHome, cat: renderCat, search: renderSearch, mine: renderMine })[tab](t); }
+function renderTab() { const t = ++token; ({ home: renderHome, cat: renderCat, tv: renderTv, search: renderSearch, mine: renderMine })[tab](t); }
 const alive = (t) => t === token;
 
 /* ---------- главная ---------- */

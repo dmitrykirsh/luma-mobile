@@ -79,3 +79,12 @@ body.np #app,body.np #pages{visibility:hidden}
 .np-menu .meps button{height:46px;border-radius:12px;background:var(--surface);border:1px solid var(--line);font:700 14px var(--body);text-align:center}
 .np-menu .meps button.done{color:var(--muted)}
 .np-menu .meps button.cur{background:var(--text);color:#0B0C10}
+
+#np.live .np-seek,#np.live .np-times,#np:not(.live) .lv,#np.live .vod{display:none}
+#np.live .np-bot{padding-bottom:6px}
+.tp{display:flex;gap:12px;padding:9px 12px;border-radius:12px;font:500 14px/1.3 var(--body);color:var(--muted)}
+.tp span{flex:none;width:96px;font-variant-numeric:tabular-nums}
+.tp b{font-weight:500;color:var(--text)}
+.tp.now{background:rgba(255,184,0,.12);color:var(--accent)}
+.tp.now b{color:var(--text);font-weight:700}
+.tp.past b{color:var(--muted)}
