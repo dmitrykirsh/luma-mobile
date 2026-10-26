@@ -23,11 +23,29 @@ document.addEventListener('click', (e) => { if (e.target.closest('[data-back]'))
 const alivePg = (el) => PG.includes(el);
 
 /* ---------- страница фильма ---------- */
+const preImg = (u) => new Promise((res) => { if (!u) return res(null); const i = new Image(); i.onload = () => res(i); i.onerror = () => res(null); i.src = u; });
+/** Кадр, логотип, постер и оценки грузятся заранее: страница открывается сразу готовой, но не дольше таймаута. */
+async function detailsPrefetch(d) {
+  const poster = preImg(d.poster);
+  const T = await tmFind(d).catch(() => null);
+  if (!T) { await poster; return null; }
+  const [, bd, logo, lb, om] = await Promise.all([poster, preImg(T.backdrop ? TMI(T.backdrop, 'w1280') : ''), preImg(T.logo ? TMI(T.logo, 'w500') : ''),
+    T.kind === 'movie' ? lbRating(T.tmdb).catch(() => null) : null, omdbRatings(T.imdb).catch(() => null)]);
+  let rates = '';
+  if (T.vote) rates += rateChip('tmdb', rateCls(T.vote), T.vote.toFixed(1), 'TMDB');
+  if (lb) rates += rateChip('lb', rateCls(lb.value * 2), lb.value.toFixed(1), 'Letterboxd');
+  if (om && om.rt) rates += rateChip('rt', om.rt >= 60 ? 'hi' : 'lo', om.rt + '%', 'Rotten Tomatoes');
+  if (om && om.mc) rates += rateChip('mc', om.mc >= 61 ? 'hi' : om.mc >= 40 ? 'mid' : 'lo', om.mc, 'Metacritic');
+  if (logo) { logo.className = 'logo-img'; logo.alt = d.name; }
+  return { T, logo, rates };
+}
 async function openDetails(id, opts = {}) {
   const pg = pushPage();
   pg.innerHTML = backBtn() + '<div class="spin" style="margin-top:40vh"></div>';
   let d;
   try { d = await info(id); } catch { if (alivePg(pg)) pg.innerHTML = backBtn() + '<div class="empty" style="padding-top:40vh"><h3>Нет связи</h3><p>Не удалось открыть страницу.</p></div>'; return; }
+  if (!alivePg(pg)) return;
+  const pre = await Promise.race([detailsPrefetch(d).catch(() => null), wait(4500)]);
   if (!alivePg(pg)) return;
   const inf = d.info || {}, seasons = seasonsOf(d), serial = seasons.length > 0;
   const people = d.people || {};
@@ -35,10 +53,12 @@ async function openDetails(id, opts = {}) {
   const lastEp = () => { const h = S.history.find((x) => x.id === d.id); return h && h.season ? h : null; };
   X.cur = (lastEp() && lastEp().season) || (seasons[0] && seasons[0].season);
   pg._x = X;
+  if (pre && pre.T) { X.T = pre.T; X.shots = pre.T.shots || []; X.logoImg = pre.logo; X.rates = pre.rates; X.pre = true; }
   const tabs = [['about', 'О фильме']];
   if (serial) tabs.push(['eps', 'Серии']);
   tabs.push(['trailers', 'Трейлеры']);
   if ((people.actors || []).length || (people.directors || []).length) tabs.push(['cast', 'Актёры']);
+  if (X.shots.length > 1) tabs.push(['shots', 'Кадры']);
   tabs.push(['more', 'Похожее']);
   X.tabs = tabs;
   const kp = Number(d.kp_rating) || 0, im = Number(d.imdb_rating) || 0;
@@ -145,15 +165,17 @@ async function detailsEnhance(X) {
   let T; try { T = await tmFind(d); } catch { T = null; }
   if (!alivePg(pg)) return;
   if (!T) { X.recsP = Promise.resolve(null); return; }
+  const had = X.pre;
   X.T = T; X.shots = T.shots || [];
-  if (T.backdrop) { const im = new Image(); im.onload = () => { if (alivePg(pg)) X.paintHead(); }; im.src = TMI(T.backdrop, 'w1280'); }
-  if (T.logo) { const img = new Image(); img.className = 'logo-img'; img.alt = d.name; img.onload = () => { X.logoImg = img; if (alivePg(pg)) { const t = $('#dTitle', pg); if (t) { t.textContent = ''; t.appendChild(img.cloneNode()); t.classList.add('has-logo'); } } }; img.src = TMI(T.logo, 'w500'); }
+  if (!had && T.backdrop) { const im = new Image(); im.onload = () => { if (alivePg(pg)) X.paintHead(); }; im.src = TMI(T.backdrop, 'w1280'); }
+  if (!had && T.logo) { const img = new Image(); img.className = 'logo-img'; img.alt = d.name; img.onload = () => { X.logoImg = img; if (alivePg(pg)) { const t = $('#dTitle', pg); if (t) { t.textContent = ''; t.appendChild(img.cloneNode()); t.classList.add('has-logo'); } } }; img.src = TMI(T.logo, 'w500'); }
   if (X.shots.length > 1 && !$('[data-dtab=shots]', pg)) { $('[data-dtab=more]', pg)?.insertAdjacentHTML('beforebegin', '<button class="chip" data-dtab="shots">Кадры</button>'); X.tabs.splice(X.tabs.length - 1, 0, ['shots', 'Кадры']); }
   X.recsP = (async () => { const out = []; let i = 0; const rc = T.recs || []; await Promise.all(Array.from({ length: 4 }, async () => { while (i < rc.length) { const x = rc[i++]; const m = await tmMatchCached(x, T.kind).catch(() => null); if (m && m.id !== d.id) out.push({ m, o: i }); } })); return out.sort((a, b) => a.o - b.o).map((x) => x.m); })();
+  if (had) { X.recsP = X.recsP || null; }
   const add = (html) => { X.rates = (X.rates || '') + html; if (alivePg(pg)) $('#dRates', pg)?.insertAdjacentHTML('beforeend', html); };
-  if (T.vote) add(rateChip('tmdb', rateCls(T.vote), T.vote.toFixed(1), 'TMDB'));
-  if (T.kind === 'movie') lbRating(T.tmdb).then((o) => { if (o) add(rateChip('lb', rateCls(o.value * 2), o.value.toFixed(1), 'Letterboxd')); }).catch(() => {});
-  omdbRatings(T.imdb).then((o) => { if (!o) return; if (o.rt) add(rateChip('rt', o.rt >= 60 ? 'hi' : 'lo', o.rt + '%', 'Rotten Tomatoes')); if (o.mc) add(rateChip('mc', o.mc >= 61 ? 'hi' : o.mc >= 40 ? 'mid' : 'lo', o.mc, 'Metacritic')); }).catch(() => {});
+  if (!had && T.vote) add(rateChip('tmdb', rateCls(T.vote), T.vote.toFixed(1), 'TMDB'));
+  if (!had && T.kind === 'movie') lbRating(T.tmdb).then((o) => { if (o) add(rateChip('lb', rateCls(o.value * 2), o.value.toFixed(1), 'Letterboxd')); }).catch(() => {});
+  if (!had) omdbRatings(T.imdb).then((o) => { if (!o) return; if (o.rt) add(rateChip('rt', o.rt >= 60 ? 'hi' : 'lo', o.rt + '%', 'Rotten Tomatoes')); if (o.mc) add(rateChip('mc', o.mc >= 61 ? 'hi' : o.mc >= 40 ? 'mid' : 'lo', o.mc, 'Metacritic')); }).catch(() => {});
   if (X.tab === 'trailers') { X.tab = ''; selectTab(X, 'trailers'); }   // трейлеры точнее с TMDB-id
   if (X.tab === 'more') { X.tab = ''; selectTab(X, 'more'); }
 }
