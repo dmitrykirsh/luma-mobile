@@ -15,8 +15,8 @@ android {
         applicationId = "ws.luma.mobile"
         minSdk = 24
         targetSdk = 34
-        versionCode = 4
-        versionName = "0.3.0"
+        versionCode = 5
+        versionName = "0.3.1"
     }
     signingConfigs {
         if (ksProps.containsKey("storeFile")) create("release") {

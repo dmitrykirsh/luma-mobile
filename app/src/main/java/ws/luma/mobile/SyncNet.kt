@@ -21,6 +21,7 @@ class SyncNet(private val js: (String) -> Unit) {
     private var udp: DatagramSocket? = null
     @Volatile var gid: String = ""
     @Volatile var did: String = ""
+    @Volatile var name: String = ""
 
     /** Отвечаем на поиск, пока приложение открыто. */
     fun startResponder(name: String, httpPort: Int) {
@@ -89,7 +90,7 @@ class SyncNet(private val js: (String) -> Unit) {
         Thread({
             val res = JSONObject()
             try {
-                val body = JSONObject().put("from", "tv").put("sealed", Backup.seal(exportJson, code)).toString().toByteArray(Charsets.UTF_8)
+                val body = JSONObject().put("from", "tv").put("name", name).put("sealed", Backup.seal(exportJson, code)).toString().toByteArray(Charsets.UTF_8)
                 val c = URL("http://$ip:$port/sync/exchange").openConnection() as HttpURLConnection
                 c.requestMethod = "POST"; c.doOutput = true; c.connectTimeout = 8000; c.readTimeout = 120000   // пока человек вводит код на втором устройстве
                 c.setRequestProperty("Content-Type", "application/json")

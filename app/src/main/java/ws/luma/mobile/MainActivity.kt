@@ -213,7 +213,7 @@ class MainActivity : Activity() {
         }
         @JavascriptInterface fun syncServe(gid: String, gkey: String, did: String, exportJson: String): String {
             val name = try { android.provider.Settings.Global.getString(contentResolver, "device_name") } catch (_: Exception) { null } ?: Build.MODEL
-            syncNet.gid = gid; syncNet.did = did
+            syncNet.gid = gid; syncNet.did = did; syncNet.name = name
             saveSnap(gid, gkey, did, exportJson)
             var srv = syncSrv
             if (srv == null) {
