@@ -54,6 +54,22 @@ class MainActivity : Activity() {
         js("window.lumaOpen && window.lumaOpen($id,${p == "1"})")
     }
 
+    // Превью YouTube из этой сети не открываются: берём через локальный SOCKS5-прокси ByeByeDPI (127.0.0.1:1080), а если он выключен, напрямую
+    private val ytDirect by lazy { okhttp3.OkHttpClient.Builder().connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS).readTimeout(8, java.util.concurrent.TimeUnit.SECONDS).build() }
+    private val ytProxy by lazy { ytDirect.newBuilder().proxy(java.net.Proxy(java.net.Proxy.Type.SOCKS, java.net.InetSocketAddress("127.0.0.1", 1080))).build() }
+    private val ytCache = object : android.util.LruCache<String, ByteArray>(6 * 1024 * 1024) { override fun sizeOf(k: String, v: ByteArray) = v.size }
+    private fun ytImage(req: WebResourceRequest): WebResourceResponse {
+        val url = req.url.toString(); val hdr = mapOf("Cache-Control" to "max-age=86400", "Access-Control-Allow-Origin" to "*")
+        ytCache.get(url)?.let { return WebResourceResponse("image/jpeg", null, 200, "OK", hdr, java.io.ByteArrayInputStream(it)) }
+        for (cl in listOf(ytProxy, ytDirect)) {
+            try {
+                val b = cl.newCall(okhttp3.Request.Builder().url(url).build()).execute().use { r -> if (r.isSuccessful) r.body!!.bytes() else null }
+                if (b != null && b.size > 100) { ytCache.put(url, b); return WebResourceResponse("image/jpeg", null, 200, "OK", hdr, java.io.ByteArrayInputStream(b)) }
+            } catch (_: Exception) {}
+        }
+        return WebResourceResponse("text/plain", "utf-8", 504, "Gone", emptyMap(), java.io.ByteArrayInputStream(ByteArray(0)))
+    }
+
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -72,6 +88,8 @@ class MainActivity : Activity() {
             CookieManager.getInstance().setAcceptCookie(true)
             webViewClient = object : WebViewClient() {
                 override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+                    val rh = request.url.host ?: ""
+                    if (request.method == "GET" && (rh.endsWith("ytimg.com") || rh.endsWith("ggpht.com"))) return ytImage(request)
                     if (net.handles(request)) return net.serve(request)
                     return loader.shouldInterceptRequest(request.url)
                 }
@@ -125,6 +143,15 @@ class MainActivity : Activity() {
         @JavascriptInterface fun version(): String = try { packageManager.getPackageInfo(packageName, 0).versionName ?: "?" } catch (_: Exception) { "?" }
         @JavascriptInterface fun takeLink(): String { val l = pendingLink; pendingLink = ""; return l }
         @JavascriptInterface fun exit() { runOnUiThread { finish() } }
+        /** Трейлер YouTube открываем в приложении YouTube: оно ходит через ByeByeDPI, если он включён. */
+        @JavascriptInterface fun openYoutube(id: String) {
+            if (!id.matches(Regex("[\\w-]{6,20}"))) return
+            runOnUiThread {
+                val u = Uri.parse("https://www.youtube.com/watch?v=$id")
+                try { startActivity(Intent(Intent.ACTION_VIEW, u).setPackage("com.google.android.youtube")) }
+                catch (_: Exception) { try { startActivity(Intent(Intent.ACTION_VIEW, u)) } catch (_: Exception) {} }
+            }
+        }
         @JavascriptInterface fun openUrl(url: String) { if (url.startsWith("https://")) runOnUiThread { try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) } catch (_: Exception) {} } }
 
         /** Режим плеера: ландшафт и без системных панелей; при выходе всё возвращается. */

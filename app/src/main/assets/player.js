@@ -307,3 +307,25 @@ function onMenuClick(e) {
   if (el.dataset.nseason) { NP.npSeason = el.dataset.nseason; renderMenu(); return; }
   if (el.dataset.nep) { const sn = el.dataset.nsn, ep = el.dataset.nep; NP.npSeason = null; closeMenu(); try { if (NP.st.d > 120000) storeProgress(NP.key, NP.st.p / 1000, NP.st.d / 1000); } catch {} playItem(NP.d, NP.seasons, sn, ep); }
 }
+
+/* ---------- трейлер с Rutube: тот же нативный плеер, без серий ---------- */
+async function playTrailer(t) {
+  if (!NATIVE || !NATIVE.npStart) { toast('Плеер недоступен'); return; }
+  const token = ++NP.token;
+  Object.assign(NP, { on: true, d: { id: -1, name: t.title }, seasons: [], season: null, episode: null, key: '', tr: null, secs: [], menu: '', st: { p: 0, d: 0, pl: false, b: true, w: true }, lastSave: 0, subApplied: '1', audioNames: [], scrub: null, skipSec: null });
+  npDom();
+  $('#np').classList.remove('hidden'); document.body.classList.add('np'); document.documentElement.classList.add('np');
+  npApplySubSize(); npSubLast = null; window.npCue('');
+  try { NATIVE.playerMode(true); } catch {}
+  $('#np .np-load').classList.remove('hidden');
+  $('#np .np-title b').textContent = t.title; $('#np .np-title span').textContent = 'Трейлер';
+  $('#npPrev').classList.add('hidden'); $('#npNext').classList.add('hidden'); $('.np-chips [data-m=eps]').classList.add('hidden');
+  closeMenu(); npUi(5000);
+  try {
+    const r = await fetch(tvPx(`https://rutube.ru/api/play/options/${t.id}/?no_404=true&referer=${encodeURIComponent('https://rutube.ru')}`, NP_UA, 'https://rutube.ru/', true));
+    const o = await r.json(); const m3u8 = o.video_balancer && (o.video_balancer.m3u8 || o.video_balancer.default);
+    if (token !== NP.token) return;
+    if (!m3u8) throw new Error('NO_STREAM');
+    NATIVE.npStart(JSON.stringify({ url: m3u8, ua: NP_UA, referer: 'https://rutube.ru/', startMs: 0, subs: [] }));
+  } catch { if (token !== NP.token) return; npClose(true); toast('Трейлер не открылся'); }
+}

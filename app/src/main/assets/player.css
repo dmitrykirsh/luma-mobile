@@ -1,6 +1,6 @@
 /* ====================== плеер ====================== */
 html.np,html.np body,html.np #app{background:transparent}
-body.np #app,body.np #det{visibility:hidden}
+body.np #app,body.np #pages{visibility:hidden}
 #np{position:fixed;inset:0;z-index:100;background:transparent;overflow:hidden;color:#fff;--sidel:max(var(--sal),22px);--sider:max(var(--sar),22px)}
 #np svg.f{fill:currentColor;stroke:none}
 .np-touch{position:absolute;inset:0;z-index:1;touch-action:none}

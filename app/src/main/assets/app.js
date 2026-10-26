@@ -16,6 +16,7 @@ const ICONS = {
   back: '<path d="M15 5l-7 7 7 7"/>',
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>',
+  restart: '<path d="M4 12a8 8 0 1 1 2.500 5.800M4 20v-5h5"/>',
   trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-12M9 7V4h6v3"/>'
 };
 const ico = (n, cls = '') => `<svg viewBox="0 0 24 24" class="${cls}">${ICONS[n]}</svg>`;
@@ -25,7 +26,7 @@ const SORTS = [['popular', 'Популярное'], ['new', 'Новинки'], [
 
 /* ---------- хранилище ---------- */
 const LS = 'luma.m';
-let S = { favs: [], history: [], progress: {}, seen: {}, done: {} };
+let S = { favs: [], history: [], progress: {}, seen: {}, done: {}, secrets: {}, extra: {} };
 try { S = { ...S, ...JSON.parse(localStorage.getItem(LS) || '{}') }; } catch {}
 let saveT = 0;
 const save = () => { clearTimeout(saveT); saveT = setTimeout(() => { try { localStorage.setItem(LS, JSON.stringify(S)); } catch {} }, 250); };
@@ -124,61 +125,84 @@ function buildTabs() {
   $('#tabs').innerHTML = TABS.map(([k, l, i]) => `<button data-t="${k}" class="${k === tab ? 'on' : ''}">${ico(i)}<span>${l}</span></button>`).join('');
   $$('#tabs button').forEach((b) => (b.onclick = () => { if (b.dataset.t === tab) { $('#view').scrollTo({ top: 0, behavior: 'smooth' }); return; } switchTab(b.dataset.t); }));
 }
-function switchTab(k) {
+function switchTab(k, top) {
   scrollPos[tab] = $('#view').scrollTop; tab = k; buildTabs();
-  renderTab(); $('#view').scrollTop = scrollPos[k] || 0;
+  renderTab(); $('#view').scrollTop = top ? 0 : (scrollPos[k] || 0);
 }
 function renderTab() { const t = ++token; ({ home: renderHome, cat: renderCat, search: renderSearch, mine: renderMine })[tab](t); }
 const alive = (t) => t === token;
 
 /* ---------- главная ---------- */
+const sec = (id, title) => `<section class="sec" id="${id}" hidden><h2>${esc(title)}</h2><div class="row"></div></section>`;
+function fillRow(id, items, opts = {}) {
+  const box = $('#' + id); if (!box) return;
+  if (!items || !items.length) { box.hidden = true; return; }
+  box.hidden = false;
+  $('.row', box).innerHTML = items.map((x) => (opts.cont ? contCard(x) : card(x))).join('');
+}
+const freshOf = (d, back) => { const y = new Date().getFullYear(); let r = d.filter((x) => +x.year >= y - back); if (r.length < 6) r = d.filter((x) => +x.year >= y - back - 3); return (r.length >= 6 ? r : d).slice(0, 20); };
+function heroHtml(items) {
+  return `<div class="hero" id="hero">${items.map((h, i) => {
+    const it = h.it, img = h.alt ? TMI(h.alt, 'w780') : (h.bd ? TMI(h.bd, 'w780') : it.poster);
+    const meta = [it.year, ...(h.genres || []).slice(0, 2), ratingOf(it) && '★ ' + ratingOf(it)].filter(Boolean).map((x) => `<span>${esc(x)}</span>`).join('');
+    return `<button class="hb" data-id="${it.id}"><img src="${esc(img)}" alt="" ${i ? 'loading="lazy"' : ''} onerror="this.remove()"><div class="t"><div class="tag">${esc(h.tag || '★ В тренде')}</div><h3>${esc(it.name)}</h3><div class="hm">${meta}</div><span class="go">${ico('play')} Смотреть</span></div></button>`;
+  }).join('')}</div><div class="dots" id="hdots">${items.map((_, i) => `<i class="${i ? '' : 'on'}"></i>`).join('')}</div>`;
+}
 async function renderHome(t) {
-  const view = $('#view');
+  const view = $('#view'); view.onscroll = null;
+  const hist = S.history.slice(0, 20);
   const head = `<div class="top"><div class="logo">${LOGO}</div><h1>Luma</h1></div>`;
-  view.innerHTML = head + skeleton();
-  const hist = S.history.filter((h) => progressPct(h.id, h.season, h.episode) > 0 || h.season || true).slice(0, 12);
-  const want = [
-    ['Новинки', { cat: 'films', sort: 'new', last: true, limit: 8 }],
-    ['Фильмы', { cat: 'films', sort: 'popular' }],
-    ['Сериалы', { cat: 'series', sort: 'popular' }],
-    ['Аниме', { cat: 'anime_series,anime_films', sort: 'popular' }],
-    ['Мультфильмы', { cat: 'cartoons,cartoon_series', sort: 'popular' }],
-    ['ТВ-шоу', { cat: 'tvshows', sort: 'popular' }]
-  ];
-  const res = await Promise.all([...want.map(([, q]) => catalog(q).catch(() => null)), catalog({ cat: 'series', sort: 'new', last: true, limit: 8 }).catch(() => null)]);
-  res[0] = [...(res[0] || []).slice(0, 4), ...(res[want.length] || []).slice(0, 4)].sort((a, b) => (b.views || 0) - (a.views || 0));
-  if (!alive(t)) return;
-  const fresh = res[0] || [];
-  let html = head;
-  if (fresh.length) html += `<div class="hero">${fresh.slice(0, 6).map((it) => `<button class="hb" data-id="${it.id}">${poster(it)}<div class="t"><div class="tag">${esc([TYPES[it.type], it.year].filter(Boolean).join(' · '))}</div><h3>${esc(it.name)}</h3><span class="go">${ico('play')} Смотреть</span></div></button>`).join('')}</div>`;
-  if (hist.length) html += secHtml('Продолжить просмотр', `<div class="row">${hist.map(contCard).join('')}</div>`);
-  want.forEach(([title], i) => { if (i > 0 && res[i] && res[i].length) html += secHtml(title, rowOf(res[i])); });
-  if (res.every((r) => !r)) html += '<div class="empty"><h3>Нет связи</h3><p>Не удалось загрузить каталог.</p><br><button class="btn" id="retry">Повторить</button></div>';
-  view.innerHTML = html;
-  $('#retry')?.addEventListener('click', renderTab);
+  view.innerHTML = head + '<div id="heroBox"><div class="sk hs"></div></div>' + (hist.length ? sec('rCont', 'Продолжить просмотр') : '') + sec('tm0', 'В тренде на этой неделе') + sec('rNew', 'Новинки кино') + sec('tm1', 'Сериалы в тренде') + sec('rSer', 'Новые сериалы') + sec('tm2', 'Сейчас в кино') + sec('rTop', 'Лучшее по Кинопоиску') + sec('tm3', 'Лучшие фильмы всех времён') + sec('rCar', 'Мультфильмы') + sec('rAni', 'Аниме') + sec('rShow', 'ТВ-шоу') + sec('tm4', 'Скоро выйдут');
+  if (hist.length) fillRow('rCont', hist, { cont: true });
+  const load = (id, o, back) => catalog({ limit: back ? 60 : 20, ...o }).then((d) => { if (back) d = freshOf(d, back); if (alive(t)) fillRow(id, d); return d; }).catch(() => { if (alive(t)) fillRow(id, []); return []; });
+  const lift = [load('rNew', { cat: 'films', last: true }, 1), load('rSer', { cat: 'series', last: true }, 2), load('rTop', { cat: 'films', sort: 'kp' }), load('rCar', { cat: 'cartoons,cartoon_series' }), load('rAni', { cat: 'anime_series,anime_films' }), load('rShow', { cat: 'tvshows' })];
+  // баннер: тренды TMDB; при сбое — новинки каталога
+  (async () => {
+    let items = null;
+    try {
+      const j = await tmdb('/trending/movie/week', {});
+      const picks = (j.results || []).filter((x) => x.backdrop_path).slice(0, 8);
+      const got = (await Promise.all(picks.map(async (x) => { const it = await tmMatchCached(x, 'movie'); return it ? { it, alt: x.poster_path || '', bd: x.backdrop_path, genres: (x.genre_ids || []).map((g) => TM_GENRES[g]).filter(Boolean) } : null; }))).filter(Boolean);
+      if (got.length >= 3) items = got;
+    } catch {}
+    if (!items) { const d = await lift[0]; items = (d || []).filter((x) => x.poster).slice(0, 6).map((it) => ({ it, tag: 'Новинка' })); }
+    if (!alive(t)) return;
+    const box = $('#heroBox'); if (!box) return;
+    if (!items.length) { box.remove(); return; }
+    box.innerHTML = heroHtml(items);
+    const hero = $('#hero'), dots = $$('#hdots i');
+    hero.onscroll = () => { const i = Math.round(hero.scrollLeft / (hero.firstElementChild.offsetWidth + 12)); dots.forEach((d, k) => d.classList.toggle('on', k === i)); };
+  })();
+  const rows = [['tm0', '/trending/movie/week', {}, 'movie'], ['tm1', '/trending/tv/week', {}, 'tv'], ['tm2', '/movie/now_playing', { region: 'RU' }, 'movie'], ['tm3', '/movie/top_rated', {}, 'movie'], ['tm4', '/movie/upcoming', { region: 'RU' }, 'movie']];
+  (async () => { for (const [id, p, q, k] of rows) { try { const r = await tmRow(p, q, k); if (alive(t)) fillRow(id, r.map((x) => x.it)); } catch {} } })();
 }
 
 /* ---------- каталог ---------- */
-let catState = { cat: 0, sort: 0, page: 1, items: [], busy: false, end: false };
+const GENRES = ['Боевик', 'Комедия', 'Драма', 'Триллер', 'Фантастика', 'Ужасы', 'Детектив', 'Фэнтези', 'Мелодрама', 'Приключения', 'Криминал', 'Семейный'];
+let catState = { cat: 0, sort: 0, genre: '', page: 1, busy: false, end: false };
 async function renderCat(t) {
   const view = $('#view');
-  const bar = () => `<div class="top"><h1>Каталог</h1></div><div class="chips" id="cc">${CATS.map(([, l], i) => `<button class="chip ${i === catState.cat ? 'on' : ''}" data-c="${i}">${l}</button>`).join('')}</div><div class="chips" id="cs">${SORTS.map(([, l], i) => `<button class="chip ${i === catState.sort ? 'on' : ''}" data-s="${i}">${l}</button>`).join('')}</div>`;
-  view.innerHTML = bar() + '<div class="grid" id="cg"></div><div id="cm"></div>';
-  catState.items = []; catState.page = 1; catState.end = false;
+  view.innerHTML = `<div class="top"><h1>Каталог</h1></div><div class="chips" id="cc">${CATS.map(([, l], i) => `<button class="chip ${i === catState.cat ? 'on' : ''}" data-c="${i}">${l}</button>`).join('')}</div>
+    <div class="chips" id="cs">${SORTS.map(([, l], i) => `<button class="chip ${i === catState.sort ? 'on' : ''}" data-s="${i}">${l}</button>`).join('')}</div>
+    <div class="chips" id="cg2"><button class="chip ${catState.genre ? '' : 'on'}" data-g="">Все жанры</button>${GENRES.map((g) => `<button class="chip ${catState.genre === g ? 'on' : ''}" data-g="${g}">${g}</button>`).join('')}</div>
+    <div class="grid" id="cg"></div><div id="cm"></div>`;
+  catState.page = 1; catState.end = false; catState.busy = false;
   $('#cc').onclick = (e) => { const b = e.target.closest('[data-c]'); if (b) { catState.cat = +b.dataset.c; renderTab(); } };
   $('#cs').onclick = (e) => { const b = e.target.closest('[data-s]'); if (b) { catState.sort = +b.dataset.s; renderTab(); } };
+  $('#cg2').onclick = (e) => { const b = e.target.closest('[data-g]'); if (b) { catState.genre = b.dataset.g; renderTab(); } };
   view.onscroll = () => { if (tab === 'cat' && view.scrollTop + view.clientHeight > view.scrollHeight - 700) loadMore(t); };
+  const on = $('#cg2 .on'); if (on) on.scrollIntoView({ inline: 'center', block: 'nearest' });
   await loadMore(t);
 }
 async function loadMore(t) {
   if (catState.busy || catState.end || !alive(t)) return;
   catState.busy = true;
   try {
-    const items = await catalog({ cat: CATS[catState.cat][0], sort: SORTS[catState.sort][0], page: catState.page, limit: 24 });
+    const items = await catalog({ cat: CATS[catState.cat][0], sort: SORTS[catState.sort][0], page: catState.page, limit: 24, genre: catState.genre });
     if (!alive(t)) return;
     if (!items.length) catState.end = true;
     else { catState.page++; $('#cg').insertAdjacentHTML('beforeend', items.map(card).join('')); }
-  } catch { if (alive(t) && !catState.items.length) $('#cm').innerHTML = '<div class="empty"><h3>Нет связи</h3></div>'; }
+  } catch { if (alive(t) && catState.page === 1) $('#cm').innerHTML = '<div class="empty"><h3>Нет связи</h3></div>'; }
   catState.busy = false;
 }
 
@@ -213,48 +237,8 @@ function renderMine(t) {
   $('#clr')?.addEventListener('click', () => { S.history = []; S.progress = {}; S.seen = {}; S.done = {}; save(); toast('История очищена'); });
 }
 
-/* ---------- страница фильма ---------- */
-let det = null;
-async function openDetails(id, opts = {}) {
-  const box = $('#det');
-  box.classList.remove('hidden'); box.scrollTop = 0;
-  box.innerHTML = `<button class="ib dback" id="dback">${ico('back')}</button><div class="spin" style="margin-top:40vh"></div>`;
-  $('#dback').onclick = closeDetails;
-  let d;
-  try { d = await info(id); } catch { box.innerHTML = `<button class="ib dback" id="dback">${ico('back')}</button><div class="empty" style="padding-top:40vh"><h3>Нет связи</h3><p>Не удалось открыть страницу.</p></div>`; $('#dback').onclick = closeDetails; return; }
-  if ($('#det').classList.contains('hidden')) return;
-  const inf = d.info || {}, seasons = seasonsOf(d), serial = seasons.length > 0;
-  const last = S.history.find((h) => h.id === d.id);
-  det = { d, seasons, serial, cur: (last && last.season) || (seasons[0] && seasons[0].season) };
-  const r = ratingOf(d);
-  const lastEp = () => { const h = S.history.find((x) => x.id === d.id); return h && h.season ? h : null; };
-  const paint = () => {
-    const h = lastEp(), resume = serial ? (h && (resumeInfo(d.id, h.season, h.episode) || h)) : resumeInfo(d.id);
-    const label = serial ? (h ? `Продолжить · ${h.season}×${h.episode}` : 'Смотреть') : (resume && resumeInfo(d.id) ? 'Продолжить' : 'Смотреть');
-    const sObj = seasons.find((s) => s.season == det.cur) || seasons[0];
-    box.innerHTML = `<button class="ib dback" id="dback">${ico('back')}</button>
-      <div class="dh"><div class="bgp" style="background-image:url('${esc(d.poster || '')}')"></div>
-        <div class="in"><div class="poster">${poster(d)}</div><div class="meta"><h1>${esc(d.name)}</h1><div class="orig">${esc(d.origin_name || inf.name_eng || '')}</div>
-          <div class="tags">${[d.year && `<span>${d.year}</span>`, `<span>${esc(TYPES[d.type] || '')}</span>`, r && `<span class="r">${r}</span>`, d.quality && `<span>${esc(d.quality)}</span>`].filter(Boolean).join('')}</div></div></div></div>
-      <div class="da"><button class="btn primary" id="dplay">${ico('play')} ${label}</button><button class="ib ${isFav(d.id) ? 'on' : ''}" id="dfav">${ico('heart')}</button></div>
-      <div class="desc cl" id="ddesc">${esc(inf.description || 'Описание пока не добавили.')}</div><button class="more" id="dmore">Читать полностью</button>
-      <div class="facts">${[['Жанр', inf.genre], ['Страна', inf.country], ['Режиссёр', inf.director], ['В ролях', inf.actors]].filter(([, v]) => v).map(([k, v]) => `<b>${k}</b><span>${esc(String(Array.isArray(v) ? v.slice(0, 6).join(', ') : v).slice(0, 160))}</span>`).join('')}</div>
-      ${serial ? `<div class="chips">${seasons.map((s) => `<button class="chip ${s.season == sObj.season ? 'on' : ''}" data-s="${s.season}">Сезон ${s.season}</button>`).join('')}</div>
-      <div class="eps">${sObj.episodes.map((e) => { const pct = isDone(d.id, sObj.season, e) ? 0 : progressPct(d.id, sObj.season, e); return `<button class="ep ${isDone(d.id, sObj.season, e) ? 'done' : ''} ${h && h.season == sObj.season && h.episode == e ? 'cur' : ''}" data-e="${e}">${e}${pct ? `<i style="width:${pct}%"></i>` : ''}</button>`; }).join('')}</div>` : '<div style="height:90px"></div>'}`;
-    $('#dback').onclick = closeDetails;
-    $('#dplay').onclick = () => { if (serial) { const hh = lastEp(); const s = hh ? hh.season : seasons[0].season, e = hh ? hh.episode : seasons[0].episodes[0]; playItem(d, seasons, s, e); } else playItem(d, seasons); };
-    $('#dfav').onclick = () => { $('#dfav').classList.toggle('on', toggleFav(d)); };
-    $('#dmore').onclick = () => { $('#ddesc').classList.remove('cl'); $('#dmore').remove(); };
-    if ((inf.description || '').length < 220) $('#dmore')?.remove();
-    $$('.chips [data-s]', box).forEach((b) => (b.onclick = () => { det.cur = b.dataset.s; const y = box.scrollTop; paint(); box.scrollTop = y; }));
-    $$('.ep', box).forEach((b) => (b.onclick = () => playItem(d, seasons, sObj.season, b.dataset.e)));
-  };
-  det.paint = paint; paint();
-  if (opts.autoplay) { const hh = lastEp(); if (serial) playItem(d, seasons, hh ? hh.season : seasons[0].season, hh ? hh.episode : seasons[0].episodes[0]); else playItem(d, seasons); }
-}
-function closeDetails() { $('#det').classList.add('hidden'); det = null; }
-/** После просмотра обновляем кнопки «Продолжить» и отметки серий. */
-function refreshAfterPlay() { if (det && !$('#det').classList.contains('hidden') && det.paint) { const y = $('#det').scrollTop; det.paint(); $('#det').scrollTop = y; } if (tab === 'home') { const y = $('#view').scrollTop; renderTab(); setTimeout(() => ($('#view').scrollTop = y), 0); } }
+/** После просмотра обновляем страницу фильма (кнопка «Продолжить», отметки серий) и главную. */
+function refreshAfterPlay() { PG.forEach((el) => el._x && el._x.refresh && el._x.refresh()); if (tab === 'home') { const y = $('#view').scrollTop; renderTab(); setTimeout(() => ($('#view').scrollTop = y), 50); } }
 
 /* ---------- нажатия ---------- */
 document.addEventListener('click', (e) => {
@@ -265,12 +249,14 @@ document.addEventListener('click', (e) => {
 /* ---------- кнопка «Назад» ---------- */
 window.lumaBack = () => {
   if (window.npBack && window.npBack()) return true;
-  if (!$('#det').classList.contains('hidden')) { closeDetails(); return true; }
+  if (PG.length) { popPage(); return true; }
   if (tab !== 'home') { switchTab('home'); return true; }
   return false;
 };
 window.lumaOpen = (id, play) => { try { openDetails(+id, { autoplay: !!play }); } catch {} };   // luma://open?id=123&play=1
 window.lumaPause = () => { try { if (window.npPauseIfPlaying) window.npPauseIfPlaying(); } catch {} };
 
-buildTabs(); renderTab();
-try { const l = NATIVE && NATIVE.takeLink(); if (l) { const [id, p] = l.split(','); setTimeout(() => window.lumaOpen(id, p === '1'), 300); } } catch {}
+addEventListener('DOMContentLoaded', () => {
+  buildTabs(); renderTab();
+  try { const l = NATIVE && NATIVE.takeLink(); if (l) { const [id, p] = l.split(','); setTimeout(() => window.lumaOpen(id, p === '1'), 300); } } catch {}
+});
