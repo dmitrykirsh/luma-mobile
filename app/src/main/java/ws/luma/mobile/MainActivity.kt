@@ -1,0 +1,167 @@
+package ws.luma.mobile
+
+import android.annotation.SuppressLint
+import android.app.Activity
+import android.content.Intent
+import android.content.pm.ActivityInfo
+import android.graphics.Color
+import android.media.AudioManager
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.Looper
+import android.view.View
+import android.view.WindowInsets
+import android.view.WindowInsetsController
+import android.view.WindowManager
+import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.widget.FrameLayout
+import androidx.webkit.WebViewAssetLoader
+import org.json.JSONObject
+
+/**
+ * Luma для телефона: тонкая оболочка вокруг веб-интерфейса из assets. Страница отдаётся с адреса https://liftw.ws/,
+ * поэтому запросы к api.liftw.ws проходят так же, как в Luma TV. Видео играет нативный ExoPlayer под прозрачной страницей.
+ */
+class MainActivity : Activity() {
+    private lateinit var web: WebView
+    private lateinit var net: NetProxy
+    private lateinit var rootLayout: FrameLayout
+    private lateinit var np: NativePlayer
+    private var pendingLink = ""
+
+    private val loader by lazy {
+        WebViewAssetLoader.Builder().setDomain("liftw.ws").addPathHandler("/", WebViewAssetLoader.AssetsPathHandler(this)).build()
+    }
+
+    /** luma://open?id=123&play=1 -> "123,1" (только цифры, чтобы в страницу не попало ничего лишнего). */
+    private fun linkOf(i: Intent?): String {
+        val u = i?.data ?: return ""
+        if (u.scheme != "luma" || u.host != "open") return ""
+        val id = u.getQueryParameter("id")?.takeIf { it.isNotEmpty() && it.length < 12 && it.all(Char::isDigit) } ?: return ""
+        return id + "," + (if (u.getQueryParameter("play") == "1") "1" else "0")
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        val l = linkOf(intent); if (l.isEmpty()) return
+        val (id, p) = l.split(',')
+        js("window.lumaOpen && window.lumaOpen($id,${p == "1"})")
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        net = NetProxy(this)
+        pendingLink = linkOf(intent)
+        web = WebView(this).apply {
+            setBackgroundColor(Color.parseColor("#0B0C10"))
+            settings.apply {
+                javaScriptEnabled = true
+                domStorageEnabled = true
+                mediaPlaybackRequiresUserGesture = false
+                mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                setSupportMultipleWindows(false)
+                textZoom = 100
+            }
+            CookieManager.getInstance().setAcceptCookie(true)
+            webViewClient = object : WebViewClient() {
+                override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+                    if (net.handles(request)) return net.serve(request)
+                    return loader.shouldInterceptRequest(request.url)
+                }
+                override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                    val h = request.url.host ?: return true
+                    if (h == "liftw.ws") return false
+                    try { startActivity(Intent(Intent.ACTION_VIEW, request.url)) } catch (_: Exception) {}
+                    return true
+                }
+            }
+            addJavascriptInterface(Bridge(), "Native")
+        }
+        WebView.setWebContentsDebuggingEnabled(true)
+        rootLayout = FrameLayout(this).apply { setBackgroundColor(Color.BLACK); addView(web, FrameLayout.LayoutParams(-1, -1)) }
+        setContentView(rootLayout)
+        np = NativePlayer(this, rootLayout) { code -> js(code) }
+        web.loadUrl("https://liftw.ws/index.html")
+    }
+
+    override fun onPause() { super.onPause(); js("window.lumaPause && window.lumaPause()") }
+
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        web.evaluateJavascript("window.lumaBack ? window.lumaBack() : false") { r -> if (r != "true") finish() }
+    }
+
+    override fun onDestroy() { try { np.stop() } catch (_: Exception) {}; web.destroy(); super.onDestroy() }
+
+    private fun js(code: String) = runOnUiThread { web.evaluateJavascript(code, null) }
+
+    private fun <T> onMain(block: () -> T): T {
+        if (Looper.myLooper() == Looper.getMainLooper()) return block()
+        val f = java.util.concurrent.FutureTask { block() }
+        runOnUiThread(f)
+        return f.get(2, java.util.concurrent.TimeUnit.SECONDS)
+    }
+
+    /** Полноэкранный режим для плеера: системные панели прячутся и показываются по свайпу от края. */
+    private fun immersive(on: Boolean) {
+        if (Build.VERSION.SDK_INT >= 30) {
+            val c = window.insetsController ?: return
+            if (on) { c.hide(WindowInsets.Type.systemBars()); c.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE }
+            else c.show(WindowInsets.Type.systemBars())
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = if (on) View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_LAYOUT_STABLE else View.SYSTEM_UI_FLAG_VISIBLE
+        }
+    }
+
+    inner class Bridge {
+        @JavascriptInterface fun version(): String = try { packageManager.getPackageInfo(packageName, 0).versionName ?: "?" } catch (_: Exception) { "?" }
+        @JavascriptInterface fun takeLink(): String { val l = pendingLink; pendingLink = ""; return l }
+        @JavascriptInterface fun exit() { runOnUiThread { finish() } }
+        @JavascriptInterface fun openUrl(url: String) { if (url.startsWith("https://")) runOnUiThread { try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) } catch (_: Exception) {} } }
+
+        /** Режим плеера: ландшафт и без системных панелей; при выходе всё возвращается. */
+        @JavascriptInterface fun playerMode(on: Boolean) {
+            runOnUiThread {
+                requestedOrientation = if (on) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                immersive(on)
+                if (on) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                web.setBackgroundColor(if (on) Color.TRANSPARENT else Color.parseColor("#0B0C10"))
+            }
+        }
+        /** Яркость окна 0..1 (жест на левой половине экрана); -1 — как в системе. */
+        @JavascriptInterface fun brightness(v: Double) {
+            runOnUiThread { val lp = window.attributes; lp.screenBrightness = if (v < 0) WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE else v.toFloat().coerceIn(0.02f, 1f); window.attributes = lp }
+        }
+        @JavascriptInterface fun getBrightness(): Double = onMain {
+            val b = window.attributes.screenBrightness
+            if (b >= 0) b.toDouble() else try { android.provider.Settings.System.getInt(contentResolver, android.provider.Settings.System.SCREEN_BRIGHTNESS) / 255.0 } catch (_: Exception) { 0.5 }
+        }
+        /** Громкость 0..1 (жест на правой половине экрана). */
+        @JavascriptInterface fun volume(v: Double) {
+            val am = getSystemService(AUDIO_SERVICE) as AudioManager
+            val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            am.setStreamVolume(AudioManager.STREAM_MUSIC, (v.coerceIn(0.0, 1.0) * max).toInt(), 0)
+        }
+        @JavascriptInterface fun getVolume(): Double {
+            val am = getSystemService(AUDIO_SERVICE) as AudioManager
+            return am.getStreamVolume(AudioManager.STREAM_MUSIC).toDouble() / am.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+        }
+
+        // нативный плеер: все вызовы из JS переносим в главный поток
+        @JavascriptInterface fun npStart(json: String) { runOnUiThread { try { np.start(json) } catch (e: Exception) { js("window.npEvent && window.npEvent('error'," + JSONObject.quote(e.toString()) + ")") } } }
+        @JavascriptInterface fun npCmd(name: String, arg: Double) { runOnUiThread { np.cmd(name, arg) } }
+        @JavascriptInterface fun npSelect(kind: String, g: Int, t: Int) { runOnUiThread { np.select(kind, g, t) } }
+        @JavascriptInterface fun npTracks(): String = onMain { np.tracks() }
+        @JavascriptInterface fun npAv1(): Boolean = onMain { np.av1Hw() }
+        @JavascriptInterface fun npVp9(): Boolean = onMain { np.vp9Hw() }
+        @JavascriptInterface fun npStop() { runOnUiThread { np.stop() } }
+    }
+}
