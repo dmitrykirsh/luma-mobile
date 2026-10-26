@@ -249,3 +249,20 @@ html{scrollbar-width:none}
 .sy p{color:#c9cdd6;font:400 13px/1.5 var(--body)}
 .sy-st{margin-top:12px;font:600 13px var(--body);color:var(--muted)}
 .sy-st.ok{color:#5ee08a}.sy-st.bad{color:#ff8a8a}.sy-st.wait{color:var(--accent)}
+
+/* горизонтальный экран: баннер ниже и шире, чтобы не занимать всю страницу */
+.hb picture{display:block;position:absolute;inset:0}
+.hb picture img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+@media (orientation:landscape){
+  .hb{width:min(42vw,380px);max-width:none;aspect-ratio:16/7;border-radius:20px}
+  .hb .t{left:16px;right:16px;bottom:14px}
+  .hb h3{margin:3px 0 6px;font-size:15px}
+  .hb .hm{margin-bottom:6px;gap:4px}
+  .hb .hm span{padding:2px 7px;font-size:10.5px}
+  .hb .go{height:28px;padding:0 13px;font-size:12px;gap:6px}
+  .hb .go svg{width:10px;height:10px}
+  .hb .tag{font-size:10px}
+  .sk.hs{height:calc(min(42vw,380px) * .4375);border-radius:20px}
+  #view{padding-left:var(--sal);padding-right:var(--sar)}
+  .cw{width:200px}
+}

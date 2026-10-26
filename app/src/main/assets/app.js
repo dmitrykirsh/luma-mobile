@@ -149,9 +149,9 @@ function fillRow(id, items, opts = {}) {
 const freshOf = (d, back) => { const y = new Date().getFullYear(); let r = d.filter((x) => +x.year >= y - back); if (r.length < 6) r = d.filter((x) => +x.year >= y - back - 3); return (r.length >= 6 ? r : d).slice(0, 20); };
 function heroHtml(items) {
   return `<div class="hero" id="hero">${items.map((h, i) => {
-    const it = h.it, img = h.alt ? TMI(h.alt, 'w780') : (h.bd ? TMI(h.bd, 'w780') : it.poster);
+    const it = h.it, img = h.alt ? TMI(h.alt, 'w780') : (h.bd ? TMI(h.bd, 'w780') : it.poster), wide = h.bd ? TMI(h.bd, 'w1280') : '';
     const meta = [it.year, ...(h.genres || []).slice(0, 2), ratingOf(it) && '★ ' + ratingOf(it)].filter(Boolean).map((x) => `<span>${esc(x)}</span>`).join('');
-    return `<button class="hb" data-id="${it.id}"><img src="${esc(img)}" alt="" ${i ? 'loading="lazy"' : ''} onerror="this.remove()"><div class="t"><div class="tag">${esc(h.tag || '★ В тренде')}</div><h3>${esc(it.name)}</h3><div class="hm">${meta}</div><span class="go">${ico('play')} Смотреть</span></div></button>`;
+    return `<button class="hb" data-id="${it.id}"><picture>${wide ? `<source media="(orientation:landscape)" srcset="${esc(wide)}">` : ''}<img src="${esc(img)}" alt="" ${i ? 'loading="lazy"' : ''} onerror="this.remove()"></picture><div class="t"><div class="tag">${esc(h.tag || '★ В тренде')}</div><h3>${esc(it.name)}</h3><div class="hm">${meta}</div><span class="go">${ico('play')} Смотреть</span></div></button>`;
   }).join('')}</div><div class="dots" id="hdots">${items.map((_, i) => `<i class="${i ? '' : 'on'}"></i>`).join('')}</div>`;
 }
 async function renderHome(t) {
