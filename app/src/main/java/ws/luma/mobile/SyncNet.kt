@@ -77,6 +77,25 @@ class SyncNet(private val js: (String) -> Unit) {
         return found.values.toList()
     }
 
+    /** Предложить вход Google всем найденным Luma в сети (телевизор спросит подтверждение на экране). Блокирующий вызов. */
+    fun offerGoogle(secret: String, from: String): JSONArray {
+        val out = JSONArray()
+        for (p in scanPeers()) {
+            val r = JSONObject().put("name", p.optString("name"))
+            try {
+                val body = JSONObject().put("secret", secret).put("from", from).toString().toByteArray(Charsets.UTF_8)
+                val c = URL("http://${p.optString("ip")}:${p.optInt("port")}/google/offer").openConnection() as HttpURLConnection
+                c.requestMethod = "POST"; c.doOutput = true; c.connectTimeout = 4000; c.readTimeout = 8000
+                c.setRequestProperty("Content-Type", "application/json")
+                c.outputStream.use { it.write(body) }
+                val txt = (if (c.responseCode in 200..299) c.inputStream else c.errorStream).bufferedReader().readText()
+                if (JSONObject(txt).optBoolean("ok")) r.put("ok", true) else r.put("error", "BUSY")
+            } catch (e: Exception) { r.put("error", "NETWORK") }
+            out.put(r)
+        }
+        return out
+    }
+
     /** Поиск для экрана подключения: список устройств, к которым можно подключиться по коду. */
     fun scan() {
         Thread({

@@ -24,6 +24,8 @@ class ImportServer(private val onData: (String) -> Unit, private val onError: (S
     @Volatile var syncExport: String = "{}"
     @Volatile var deviceName: String = ""
     @Volatile var onSyncIn: (String) -> Unit = {}
+    /** Другое устройство предлагает вход Google (kind:refresh): отвечаем «принято/не принято» — решает приложение (спрашивает пользователя). */
+    @Volatile var onGoogleOffer: (String, String) -> Boolean = { _, _ -> false }
 
     fun start(): Int {
         var s: ServerSocket? = null
@@ -52,6 +54,7 @@ class ImportServer(private val onData: (String) -> Unit, private val onError: (S
             if (path == "/sync/info") { reply(out, 200, "application/json", JSONObject().put("app", "luma-tv").put("name", deviceName).toString()); return }
             if (path == "/sync/exchange" && method == "POST") { syncExchange(inp, len, out); return }
             if (path == "/sync/v2" && method == "POST") { syncV2(inp, len, out); return }
+            if (path == "/google/offer" && method == "POST") { googleOffer(inp, len, out); return }
             val okPin = Regex("(^|&)k=$pin($|&)").containsMatchIn(q)
             if (!okPin) { reply(out, 403, "text/plain; charset=utf-8", "Ссылка устарела. Откройте QR на экране ТВ заново."); return }
             if (method == "GET") { reply(out, 200, "text/html; charset=utf-8", if (Regex("(^|&)m=pl($|&)").containsMatchIn(q)) PAGE_PL else PAGE); return }
@@ -95,6 +98,18 @@ class ImportServer(private val onData: (String) -> Unit, private val onError: (S
             onSyncIn(plain)
         } catch (e: Backup.Bad) { reply(out, 200, "application/json", "{\"error\":\"BAD_CODE\"}") }
         catch (e: Exception) { reply(out, 400, "application/json", "{\"error\":\"BAD_REQUEST\"}") }
+    }
+
+    /** Вход Google от телефона или ПК: тело {secret, from}. Принимаем только если сами ещё не вошли; приложение спрашивает пользователя. */
+    private fun googleOffer(inp: BufferedInputStream, len: Int, out: java.io.OutputStream) {
+        if (len !in 1..4096) { reply(out, 400, "application/json", "{\"error\":\"BAD_REQUEST\"}"); return }
+        val buf = ByteArray(len); var n = 0
+        while (n < len) { val r = inp.read(buf, n, len - n); if (r < 0) break; n += r }
+        try {
+            val j = JSONObject(String(buf, 0, n, Charsets.UTF_8))
+            val ok = onGoogleOffer(j.optString("secret"), j.optString("from"))
+            reply(out, 200, "application/json", if (ok) "{\"ok\":true}" else "{\"error\":\"BUSY\"}")
+        } catch (e: Exception) { reply(out, 400, "application/json", "{\"error\":\"BAD_REQUEST\"}") }
     }
 
     /** Обмен без кода: тело запечатано ключом группы; отвечаем своими данными, запечатанными тем же ключом. */

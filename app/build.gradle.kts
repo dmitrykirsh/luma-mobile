@@ -7,16 +7,23 @@ plugins {
 
 // ключ подписи релиза лежит в keystore.properties (в репозиторий не попадает); без него релиз подписывается отладочным ключом
 val ksProps = Properties().apply { val f = rootProject.file("keystore.properties"); if (f.exists()) f.inputStream().use { load(it) } }
+// OAuth-клиент Google для синхронизации через Drive — общий файл вне репозиториев (D:\lift\sync-credentials.local.properties)
+val syncProps = Properties().apply { val f = rootProject.file("../sync-credentials.local.properties"); if (f.exists()) f.inputStream().use { load(it) } }
 
 android {
     namespace = "ws.luma.mobile"
     compileSdk = 34
+    buildFeatures { buildConfig = true }
     defaultConfig {
         applicationId = "ws.luma.mobile"
         minSdk = 24
         targetSdk = 34
-        versionCode = 5
-        versionName = "0.3.1"
+        versionCode = 6
+        versionName = "0.3.2"
+        buildConfigField("String", "DRIVE_CLIENT_ID", "\"${syncProps.getProperty("driveClientId", "")}\"")
+        buildConfigField("String", "DRIVE_CLIENT_SECRET", "\"${syncProps.getProperty("driveClientSecret", "")}\"")
+        buildConfigField("String", "DRIVE_DESK_ID", "\"${syncProps.getProperty("driveDesktopClientId", "")}\"")
+        buildConfigField("String", "DRIVE_DESK_SECRET", "\"${syncProps.getProperty("driveDesktopClientSecret", "")}\"")
     }
     signingConfigs {
         if (ksProps.containsKey("storeFile")) create("release") {

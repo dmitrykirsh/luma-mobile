@@ -12,7 +12,8 @@ function mergeBackup(b) {
   for (const [gk, gts] of Object.entries(d.gone || {})) if (gts > (S.gone[gk] || 0)) S.gone[gk] = gts;   // отметки об удалении: удалённое на одном устройстве не возвращается с другого
   { const cut = Date.now() - 90 * 864e5; for (const gk of Object.keys(S.gone)) if (S.gone[gk] < cut) delete S.gone[gk]; }
   S.favs = S.favs.filter((f) => !(S.gone['f:' + f.id] > (f.at || 0)));
-  S.history = S.history.filter((h) => !(S.gone['h:' + h.id] > (h.ts || 0)));
+  const seenAfter = (id, ts) => [S.progress || {}, d.progress || {}].some((pr) => Object.entries(pr).some(([k, p]) => k.startsWith(id + ':') && (p.ts || 0) > ts));   // был просмотр позже удаления: запись остаётся
+  S.history = S.history.filter((h) => !(S.gone['h:' + h.id] > (h.ts || 0) && !seenAfter(h.id, S.gone['h:' + h.id])));
   S.seen = { ...(S.seen || {}) };
   for (const [k, arr] of Object.entries(d.seen || {})) S.seen[k] = [...new Set([...(S.seen[k] || []), ...arr])];
   S.progress = { ...(S.progress || {}) };
