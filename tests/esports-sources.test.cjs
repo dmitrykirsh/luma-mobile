@@ -21,4 +21,6 @@ test('Dota results merge only for the same pair of teams',()=>{
   assert.equal(same({home:{name:'Alpha'},away:{name:'Beta'}},{home:'Beta',away:'Alpha'}),true);
   assert.equal(same({home:{name:'Alpha'},away:{name:'Beta'}},{home:'Alpha',away:'Gamma'}),false);
   assert.equal(same({home:{name:'Alpha'},away:{name:'Alpha'}},{home:'Alpha',away:'Alpha'}),false);
+  assert.equal(same({home:{name:'PARIVISION'},away:{name:'Aurora Gaming'}},{home:'Aurora',away:'PARIVISION'}),true);
+  assert.equal(same({home:{name:'PARIVISION'},away:{name:'Aurora Gaming'}},{home:'Aurora Academy',away:'PARIVISION'}),false);
 });
