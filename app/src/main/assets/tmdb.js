@@ -45,7 +45,7 @@ async function tmdb(path, params = {}) {
   const headers = { Accept: 'application/json' };
   if (key) { if (key.startsWith('eyJ')) headers.Authorization = 'Bearer ' + key; else u.searchParams.set('api_key', key); }
   const ck = u.toString(); if (tmCache.has(ck)) return tmCache.get(ck);
-  const r = await fetch(u, { headers });
+  const r = await fetch(u, { headers, signal: AbortSignal.timeout(12000) });
   if (!r.ok) throw new Error(r.status === 401 || r.status === 403 ? (shared ? 'SHARED' : 'BAD_KEY') : 'HTTP ' + r.status);
   const v = await r.json(); tmCache.set(ck, v); return v;
 }

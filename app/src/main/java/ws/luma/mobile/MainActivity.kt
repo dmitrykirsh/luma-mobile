@@ -16,13 +16,18 @@ import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.webkit.CookieManager
+import android.webkit.WebChromeClient
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
+import androidx.webkit.ProxyConfig
+import androidx.webkit.ProxyController
 import androidx.webkit.WebViewAssetLoader
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import org.json.JSONObject
 
 /**
@@ -30,6 +35,12 @@ import org.json.JSONObject
  * поэтому запросы к api.liftw.ws проходят так же, как в Luma TV. Видео играет нативный ExoPlayer под прозрачной страницей.
  */
 class MainActivity : Activity() {
+    private val animeOn by lazy { AnimeOnAuth(this) }
+    private val youtubeProxyLock = Any()
+    private var youtubeProxy: Process? = null
+    private var youtubeProxyGeneration = 0
+    private var youtubeCustomView: View? = null
+    private var youtubeCustomCallback: WebChromeClient.CustomViewCallback? = null
     private lateinit var web: WebView
     private lateinit var net: NetProxy
     private lateinit var rootLayout: FrameLayout
@@ -102,11 +113,33 @@ class MainActivity : Activity() {
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                     val h = request.url.host ?: return true
                     if (h == "liftw.ws") return false
+                    if (!request.isForMainFrame && synchronized(youtubeProxyLock) { youtubeProxy != null } && (h == "youtube.com" || h.endsWith(".youtube.com") || h == "youtube-nocookie.com" || h.endsWith(".youtube-nocookie.com"))) return false
                     try { startActivity(Intent(Intent.ACTION_VIEW, request.url)) } catch (_: Exception) {}
                     return true
                 }
             }
+            webChromeClient = object : WebChromeClient() {
+                override fun onShowCustomView(view: View, callback: CustomViewCallback) {
+                    if (youtubeCustomView != null) { callback.onCustomViewHidden(); return }
+                    youtubeCustomView = view; youtubeCustomCallback = callback
+                    rootLayout.addView(view, FrameLayout.LayoutParams(-1, -1))
+                }
+                override fun onHideCustomView() { hideYoutubeCustomView() }
+            }
             addJavascriptInterface(Bridge(), "Native")
+        }
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
+            WebViewCompat.addWebMessageListener(web, "LumaAnimeOnSecret", setOf("https://liftw.ws")) { _, message, _, isMainFrame, reply ->
+                if (isMainFrame) try {
+                    val req=JSONObject(message.data ?: "{}"); val response=JSONObject().put("id",req.optInt("id"))
+                    when(req.optString("action")) {
+                        "get" -> response.put("value",animeOn.loginSecret())
+                        "adopt" -> response.put("value",animeOn.adoptLoginSecret(req.optString("value")))
+                        else -> response.put("error","BAD_REQUEST")
+                    }
+                    reply.postMessage(response.toString())
+                } catch (_: Exception) {}
+            }
         }
         WebView.setWebContentsDebuggingEnabled(true)
         rootLayout = FrameLayout(this).apply { setBackgroundColor(Color.BLACK); addView(web, FrameLayout.LayoutParams(-1, -1)) }
@@ -118,14 +151,34 @@ class MainActivity : Activity() {
         web.loadUrl("https://liftw.ws/index.html")
     }
 
-    override fun onPause() { super.onPause(); js("window.lumaPause && window.lumaPause()") }
+    private fun hideYoutubeCustomView() {
+        youtubeCustomView?.let { rootLayout.removeView(it) }
+        youtubeCustomView = null
+        val callback = youtubeCustomCallback
+        youtubeCustomCallback = null
+        callback?.onCustomViewHidden()
+    }
+
+    override fun onPause() { super.onPause(); js("window.lumaPause && window.lumaPause(); window.lumaYoutubePause?.()") }
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
+        if (youtubeCustomView != null) { hideYoutubeCustomView(); return }
         web.evaluateJavascript("window.lumaBack ? window.lumaBack() : false") { r -> if (r != "true") finish() }
     }
 
-    override fun onDestroy() { try { np.stop(); syncNet.stopResponder(); syncSrv?.stop() } catch (_: Exception) {}; web.destroy(); super.onDestroy() }
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 7391) { MobileReminders.restore(this); js("window.lumaReminderPermissionChanged?.()") }
+    }
+    override fun onResume() { super.onResume(); if (::web.isInitialized) js("window.lumaReminderPermissionChanged?.()") }
+
+    override fun onDestroy() { hideYoutubeCustomView(); stopYoutubeProxy(); try { np.stop(); syncNet.stopResponder(); syncSrv?.stop() } catch (_: Exception) {}; web.destroy(); super.onDestroy() }
+
+    private fun stopYoutubeProxy() {
+        synchronized(youtubeProxyLock) { youtubeProxyGeneration++; youtubeProxy?.destroy(); youtubeProxy = null }
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) try { ProxyController.getInstance().clearProxyOverride(androidx.core.content.ContextCompat.getMainExecutor(this)) {} } catch (_: Exception) {}
+    }
 
     private fun js(code: String) = runOnUiThread { web.evaluateJavascript(code, null) }
 
@@ -149,10 +202,79 @@ class MainActivity : Activity() {
     }
 
     inner class Bridge {
+        @JavascriptInterface fun aoStatus(): String = animeOn.status()
+        @JavascriptInterface fun aoLoginAsync(email: String, password: String) {
+            Thread { val result = animeOn.login(email, password); js("window.lumaAnimeOnLogin?.(${JSONObject.quote(result)})") }.start()
+        }
+        @JavascriptInterface fun aoLogout(): String = animeOn.logout()
+        @JavascriptInterface fun aoResolveAsync(input: String, requestId: Int) {
+            Thread { val result = animeOn.resolve(input); js("window.lumaAnimeOnResolve?.($requestId,${JSONObject.quote(result)})") }.start()
+        }
+        @JavascriptInterface fun remindersEnabled(): Boolean = MobileReminders.enabled(this@MainActivity)
+        @JavascriptInterface fun remindersMarkShown(id: String, start: Double): Boolean = MobileReminders.markShownInApp(this@MainActivity, id, start.toLong())
+        @JavascriptInterface fun remindersSync(json: String) { MobileReminders.replace(this@MainActivity, json) }
+        @JavascriptInterface fun remindersExactEnabled(): Boolean = MobileReminders.exactEnabled(this@MainActivity)
+        @JavascriptInterface fun remindersOpenExactSettings() { runOnUiThread { if (Build.VERSION.SDK_INT >= 31) { try { startActivity(Intent(android.provider.Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, Uri.parse("package:$packageName"))) } catch (_: Exception) {} } } }
+        @JavascriptInterface fun remindersOpenSettings() { runOnUiThread { try { val i = if (Build.VERSION.SDK_INT >= 26) Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, packageName) else Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")); startActivity(i) } catch (_: Exception) { try { startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))) } catch (_: Exception) {} } } }
+        @JavascriptInterface fun remindersRequestPermission() { runOnUiThread { if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 7391) } }
+        @JavascriptInterface fun searchTwitch(search: String, requestId: Int) {
+            val text = search.trim().take(100)
+            if (text.length < 3) { js("window.mobileTwitchSearchResolved && window.mobileTwitchSearchResolved($requestId,[])"); return }
+            Thread {
+                val output = org.json.JSONArray()
+                var failed = false
+                try {
+                    val conn = java.net.URL("https://gql.twitch.tv/gql").openConnection() as java.net.HttpURLConnection
+                    conn.requestMethod = "POST"; conn.connectTimeout = 10000; conn.readTimeout = 10000; conn.doOutput = true
+                    conn.setRequestProperty("Client-ID", "kimne78kx3ncx6brgo4mv6wki5h1ko"); conn.setRequestProperty("Content-Type", "application/json")
+                    val query = "query(\$q:String!){searchStreams(userQuery:\$q,first:40){edges{node{title viewersCount broadcaster{login displayName profileImageURL(width:70)} game{name}}}}}"
+                    val body = JSONObject().put("query", query).put("variables", JSONObject().put("q", text)).toString()
+                    conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+                    val edges = JSONObject(conn.inputStream.bufferedReader().use { it.readText() }).optJSONObject("data")?.optJSONObject("searchStreams")?.optJSONArray("edges") ?: throw IllegalStateException("Missing Twitch results")
+                    if (edges != null) for (i in 0 until minOf(edges.length(), 40)) {
+                        val item = edges.optJSONObject(i)?.optJSONObject("node") ?: continue; val b = item.optJSONObject("broadcaster") ?: continue
+                        val id=b.optString("login"); if (!id.matches(Regex("[A-Za-z0-9_]{3,25}"))) continue
+                        output.put(JSONObject().put("id",id).put("name",b.optString("displayName").take(100)).put("title",item.optString("title").take(250)).put("image",b.optString("profileImageURL")).put("game",item.optJSONObject("game")?.optString("name") ?: "").put("viewers",item.optInt("viewersCount")))
+                    }
+                    conn.disconnect()
+                } catch (_: Exception) { failed = true }
+                js("window.mobileTwitchSearchResolved && window.mobileTwitchSearchResolved($requestId," + output.toString() + "," + failed + ")")
+            }.start()
+        }
         @JavascriptInterface fun version(): String = try { packageManager.getPackageInfo(packageName, 0).versionName ?: "?" } catch (_: Exception) { "?" }
         @JavascriptInterface fun takeLink(): String { val l = pendingLink; pendingLink = ""; return l }
         @JavascriptInterface fun exit() { runOnUiThread { finish() } }
         /** Трейлер YouTube открываем в приложении YouTube: оно ходит через ByeByeDPI, если он включён. */
+        @JavascriptInterface fun prepareYoutubeEmbed(id: String) {
+            if (!id.matches(Regex("[A-Za-z0-9_-]{11}"))) return
+            val generation = synchronized(youtubeProxyLock) { youtubeProxyGeneration++; youtubeProxy?.destroy(); youtubeProxy = null; youtubeProxyGeneration }
+            Thread {
+                try {
+                    if (!WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE) || !WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE_REVERSE_BYPASS)) throw IllegalStateException("proxy unsupported")
+                    val port = java.net.ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1")).use { it.localPort }
+                    val helper = java.io.File(applicationInfo.nativeLibraryDir, "liblumayoutubeproxy.so")
+                    val args = listOf(helper.absolutePath, "-i", "127.0.0.1", "-p", port.toString(), "-d1", "-d3+s", "-s6+s", "-d9+s", "-s12+s", "-d15+s", "-s20+s", "-d25+s", "-s30+s", "-d35+s", "-r1+s", "-S", "-a1", "-At,r,s,c", "-d1", "-d3+s", "-s6+s", "-d9+s", "-s12+s", "-d15+s", "-s20+s", "-d25+s", "-s30+s", "-d35+s", "-S", "-a1")
+                    val builderProcess = ProcessBuilder(args).redirectErrorStream(true)
+                    val logFile = java.io.File(cacheDir, "youtube-proxy.log")
+                    val process = if (Build.VERSION.SDK_INT >= 26) builderProcess.redirectOutput(logFile).start() else builderProcess.start().also { child ->
+                        Thread { try { child.inputStream.use { input -> logFile.outputStream().use { output -> input.copyTo(output) } } } catch (_: Exception) {} }.start()
+                    }
+                    synchronized(youtubeProxyLock) { if (generation != youtubeProxyGeneration) { process.destroy(); return@Thread }; youtubeProxy = process }
+                    var available = false
+                    for (attempt in 0 until 20) { try { java.net.Socket().use { it.connect(java.net.InetSocketAddress("127.0.0.1", port), 200) }; available = true; break } catch (_: Exception) { Thread.sleep(100) } }
+                    if (!available) throw IllegalStateException("proxy did not start")
+                    val builder = ProxyConfig.Builder().addProxyRule("socks5://127.0.0.1:$port").setReverseBypassEnabled(true)
+                    listOf("youtube.com", "*.youtube.com", "youtube-nocookie.com", "*.youtube-nocookie.com", "googlevideo.com", "*.googlevideo.com", "ytimg.com", "*.ytimg.com", "ggpht.com", "*.ggpht.com").forEach { builder.addBypassRule(it) }
+                    ProxyController.getInstance().setProxyOverride(builder.build(), androidx.core.content.ContextCompat.getMainExecutor(this@MainActivity)) {
+                        if (synchronized(youtubeProxyLock) { generation == youtubeProxyGeneration }) js("window.lumaMobileYoutubeReady && window.lumaMobileYoutubeReady(${JSONObject.quote(id)}, true)")
+                    }
+                } catch (_: Exception) {
+                    val current = synchronized(youtubeProxyLock) { if (generation == youtubeProxyGeneration) { youtubeProxy?.destroy(); youtubeProxy = null; true } else false }
+                    if (current) js("window.lumaMobileYoutubeReady && window.lumaMobileYoutubeReady(${JSONObject.quote(id)}, false)")
+                }
+            }.start()
+        }
+        @JavascriptInterface fun clearYoutubeEmbed() = stopYoutubeProxy()
         @JavascriptInterface fun openYoutube(id: String) {
             if (!id.matches(Regex("[\\w-]{6,20}"))) return
             runOnUiThread {
@@ -198,7 +320,7 @@ class MainActivity : Activity() {
                 try {
                     val f = java.io.File(cacheDir, "updates/luma-mobile-update.apk")
                     net.download(url, f) { p -> js("window.lumaUpdateState && window.lumaUpdateState({state:'downloading',pct:$p})") }
-                    if (!packageManager.canRequestPackageInstalls()) {
+                    if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) {
                         js("window.lumaUpdateState && window.lumaUpdateState({state:'needperm'})")
                         runOnUiThread { try { startActivity(Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName"))) } catch (_: Exception) {} }
                         return@Thread

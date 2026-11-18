@@ -18,6 +18,15 @@ function openSheet(html) {
 }
 function closeSheet() { if (!sheetEl) return false; const s = sheetEl; sheetEl = null; s.classList.add('out'); setTimeout(() => s.remove(), 220); return true; }
 window.sheetBack = () => closeSheet();
+function animeOnStatus() { try { return JSON.parse(NATIVE?.aoStatus() || '{}'); } catch { return {}; } }
+function animeOnDialog() {
+  const status = animeOnStatus();
+  const s = openSheet(`<h3>AnimeOn</h3><p class="sub">Зарегистрируйтесь на сайте AnimeOn, затем введите почту и пароль здесь. Вход нужен для просмотра через плеер AnimeOn.</p><button class="btn" id="aoSite">Открыть сайт AnimeOn ↗</button>${status.connected ? `<p class="sub">Подключено: ${esc(status.email || 'аккаунт')}</p><button class="btn" id="aoLogout">Выйти из аккаунта</button>` : '<input id="aoEmail" type="email" inputmode="email" aria-label="Почта AnimeOn" placeholder="Почта" autocomplete="username" autocapitalize="off"><input id="aoPassword" type="password" aria-label="Пароль AnimeOn" placeholder="Пароль" autocomplete="current-password"><div class="derr" id="aoError"></div><div class="dbtns"><button class="btn primary" id="aoLogin">Войти</button></div>'}`); s.classList.add('ao-auth-sheet');
+  $('#aoSite',s).onclick=()=>NATIVE?.openUrl('https://animeon.cc/');
+  $('#aoLogout',s)?.addEventListener('click',()=>{NATIVE?.aoLogout();aoRefreshSecret(true).then(()=>{save();syServe();});closeSheet();renderTab();toast('Аккаунт AnimeOn отключён');});
+  $('#aoLogin',s)?.addEventListener('click',()=>{const email=$('#aoEmail',s).value.trim(),password=$('#aoPassword',s).value;if(!email||!password){$('#aoError',s).textContent='Введите почту и пароль.';return;}if(!NATIVE?.aoLoginAsync){$('#aoError',s).textContent='Вход недоступен в этой сборке.';return;}$('#aoLogin',s).disabled=true;$('#aoError',s).textContent='Входим…';NATIVE.aoLoginAsync(email,password);$('#aoPassword',s).value='';});
+}
+window.lumaAnimeOnLogin = raw => {let result={};try{result=JSON.parse(raw);}catch{}const s=sheetEl;if(result.ok){aoRefreshSecret(true).then(()=>{save();syServe();});if(s&&$('#aoError',s)){closeSheet();renderTab();toast('AnimeOn подключён');}return;}if(!s||!$('#aoError',s))return;$('#aoLogin',s).disabled=false;$('#aoError',s).textContent=result.error==='INVALID_CREDENTIALS'?'Неверная почта или пароль.':'Не удалось войти. Проверьте подключение и попробуйте снова.';};
 
 /* ---------- ключи сервисов ---------- */
 function keyDlg(name) {
@@ -92,12 +101,14 @@ function ensureGroup() { if (!S.group) { S.group = { id: rnd(8, HEX), key: rnd(2
 function exportJson() {
   const x = tvX();
   return JSON.stringify({ app: 'Luma', format: 1, exportedAt: new Date().toISOString(), version: NATIVE ? NATIVE.version() : '',
-    data: { favs: S.favs, history: S.history, seen: S.seen, done: S.done, gone: S.gone || {}, progress: S.progress, lists: x.lists || [], tvFav: x.tvFav || [], tvStats: x.tvStats || {}, tvCustom: (x.tvCustom || []).filter((e) => e.url), tvLast: x.tvLast || '' },
+    data: { ...(x.syncForeign || {}), favs: S.favs, history: S.history, seen: S.seen, done: S.done, watchPrefs: x.watchPrefs || {}, gone: S.gone || {}, progress: S.progress, lists: x.lists || [], tvFav: x.tvFav || [], tvFavMeta: x.tvFavMeta || {}, tvStats: x.tvStats || {}, tvCustom: (x.tvCustom || []).filter((e) => e.url), tvLast: x.tvLast || '' },
     secrets: syncSecrets(), sync: S.group ? { gid: S.group.id, gkey: S.group.key } : undefined });
 }
 /** Ключи сервисов + вход Google (вход едет только между устройствами по сети, в файл на Диске он не попадает). */
 function syncSecrets(withGoogle = true) {
-  const sec = { ...(S.secrets || {}) }; delete sec.google;
+  if(S.secrets?.animeon&&window.LumaAnimeOnSecret){aoAdoptSecret(S.secrets.animeon);delete S.secrets.animeon;save();}
+  const sec = { ...(S.secrets || {}) }; delete sec.google; delete sec.animeon;
+  if (aoSecretCache) sec.animeon = aoSecretCache;
   if (withGoogle) { try { const g = NATIVE.driveSecret(); if (g) sec.google = g; } catch {} }
   return sec;
 }
@@ -108,7 +119,7 @@ function adoptGoogle(obj) {
   if (!g) return;
   try { if (NATIVE.driveAdopt(g)) { renderDriveBox(); setTimeout(() => driveSyncNow(), 1500); } } catch {}
 }
-const syState = () => JSON.stringify([S.history.length, S.favs.length, Object.keys(S.progress).length, Object.values(S.done || {}).reduce((n, a) => n + a.length, 0), Math.max(0, ...S.history.map((h) => h.ts || 0)), Math.max(0, ...Object.values(S.progress).map((p) => p.ts || 0))]);
+const syState = () => JSON.stringify([S.history, S.favs, S.progress, S.seen, S.done, S.gone, S.secrets, S.extra?.watchPrefs || {}, S.extra?.lists || [], S.extra?.tvFav || [], S.extra?.tvFavMeta || {}, S.extra?.tvStats || {}, S.extra?.tvCustom || [], S.extra?.tvLast || '', S.extra?.syncForeign || {}]);
 /** Приём данных в нашем сервере и сеть: сервер всегда включён, чтобы другие устройства могли нас найти. */
 function syServe() {
   if (!NATIVE || !NATIVE.syncServe) return;
@@ -122,7 +133,7 @@ function applyIncoming(plain, from, quiet) {
   let obj; try { obj = JSON.parse(plain); } catch { syStatus('Получены повреждённые данные', 'bad'); return false; }
   const before = syState();
   adoptGroup(obj.sync); adoptGoogle(obj);
-  const r = mergeBackup(obj); S.synced = Date.now(); save();
+  let r;try{r=mergeBackup(obj);}catch{syStatus('Не удалось безопасно принять данные AnimeOn. Обновите WebView.','bad');return false;} S.synced = Date.now(); save();
   mergeDone(obj);
   try { NATIVE.syncUpdate(exportJson()); } catch {}
   tmFindCache.clear();
@@ -160,7 +171,14 @@ window.lumaSyncAuto = (json) => {
   else syStatus(r.length ? 'Устройства найдены, но обменяться не удалось' : 'Других устройств группы в сети нет', r.length ? 'bad' : '');
   if (changed) { refreshUi(); if (ok > 1 && !SY.again) { SY.again = true; setTimeout(() => { SY.again = false; SY.last = 0; autoSync(false); }, 600); } }
 };
-function refreshUi() { if (typeof NP !== 'undefined' && NP.on) return; if (typeof refreshAfterPlay === 'function') refreshAfterPlay(); }
+function refreshAfterPlay(){
+  if(typeof NP!=='undefined'&&NP.on)return;
+  const active=document.activeElement;if(active&&(/^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName)||active.isContentEditable))return;
+  const page=typeof PG==='undefined'?null:[...PG].reverse().find(p=>p._refreshAo||p._x?.refresh);
+  if(page?._refreshAo)page._refreshAo();else page?._x?.refresh?.();
+  if(['home','mine','tv'].includes(tab)){const view=$('#view'),top=view?.scrollTop||0;renderTab();if(view)view.scrollTop=top;}
+}
+function refreshUi(){refreshAfterPlay();}
 window.lumaSyncIn = (plain) => { try { if (applyIncoming(plain, 'устройства', true)) { syStatus('Получены данные от другого устройства', 'ok'); refreshUi(); } } catch {} };
 function takePending() {
   try { const l = JSON.parse(NATIVE.takeSyncIn()); let ch = false; for (const plain of l) if (applyIncoming(plain, 'устройства', true)) ch = true; if (ch) refreshUi(); } catch {}
@@ -178,13 +196,13 @@ function openSync() {
   try { NATIVE.syncCode(SY.code); } catch {}
   pg._onClose = () => { try { NATIVE.syncCode(''); } catch {} };
   const hasG = !!S.group;
-  pg.innerHTML = `${backBtn()}<div class="top" style="padding-top:calc(var(--sat) + 62px)"><h1>Синхронизация</h1></div>
+  pg.innerHTML = `${backBtn()}<div class="mobile-catalog-head mobile-lists-head"><span>УСТРОЙСТВА LUMA</span><div><h1>Синхронизация</h1></div><p>История, избранное и прогресс на ваших устройствах.</p></div>
     <h3 class="ph3">Google-аккаунт</h3><div id="syDrive">${driveBoxHtml()}</div>
     <h3 class="ph3">Или в этой Wi-Fi сети</h3>
     <div class="list" style="margin-bottom:6px"><button class="li" id="syNow">${ico('sync')}<div>Синхронизировать сейчас<small>${hasG ? 'С устройствами вашей группы в этой сети' : 'Сначала подключите хотя бы одно устройство'}</small></div></button></div>
     <div class="sy-st" id="syStatus" style="text-align:center;margin:10px 16px 14px">${esc(SY.status || (hasG ? 'Устройства группы обмениваются сами: при запуске, после просмотра и по кнопке' : ''))}</div>
     <h3 class="ph3">Подключить новое устройство</h3>
-    <div class="sy"><small>Код этого устройства</small><b>${SY.code.split('').join(' ')}</b><p>Введите его на компьютере (Luma → Настройки → Телевизор) или на другом устройстве. Подключить нужно один раз: дальше они будут синхронизироваться сами.</p></div>
+    <div class="sy"><small>Код этого устройства</small><b>${SY.code.split('').join(' ')}</b><p>На другом устройстве откройте настройки синхронизации, найдите этот телефон и введите код. Подключить устройства нужно только один раз.</p></div>
     <div class="list" style="margin-top:6px"><button class="li" id="syScan">${ico('refresh')}<div>Найти устройство<small>Если Luma запущена на ПК, ТВ или другом телефоне в этой сети</small></div></button></div><div id="syList" class="list" style="margin-top:10px"></div>
     <p class="about">Последняя синхронизация: ${esc(lastSyncText())}${S.group ? ' · группа ' + esc(S.group.id) : ''}</p>`;
   $('#syNow', pg).onclick = () => autoSync(true);
@@ -271,7 +289,7 @@ function driveSyncNow() {
 window.lumaDriveRemote = (json) => {
   let r = {}; try { r = JSON.parse(json); } catch {}
   if (r.error) { driveFinish(r.error); return; }
-  if (r.data) { try { const obj = JSON.parse(r.data); if (obj.secrets) delete obj.secrets.google; mergeBackup(obj); mergeDone(obj); } catch {} }
+  if (r.data) { try { const obj = JSON.parse(r.data); if (obj.secrets) delete obj.secrets.google; mergeBackup(obj); mergeDone(obj); } catch { driveFinish('MERGE');return; } }
   try { const o = JSON.parse(exportJson()); o.secrets = syncSecrets(false); delete o.sync; NATIVE.driveUpload(JSON.stringify(o)); } catch { driveFinish('NETWORK'); }
 };
 window.lumaDriveUploaded = (json) => { let r = {}; try { r = JSON.parse(json); } catch {} driveFinish(r.error); };
@@ -279,7 +297,7 @@ function driveFinish(err) {
   DR.busy = false;
   DR.msg = err ? ({ NO_AUTH: 'Сессия истекла, войдите заново.', NETWORK: 'Нет связи с Google.' }[err] || 'Не получилось синхронизировать.') : 'Готово · ' + new Date().toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' });
   renderDriveBox();
-  if (!err) { refreshUi(); toast('Синхронизация завершена'); }
+  if (!err) { refreshUi(); toastSync('Синхронизация завершена'); }
 }
 let driveLastAuto = 0;
 function driveAutoSync() {
@@ -299,18 +317,22 @@ function settingsHtml() {
   const sec = S.secrets || {};
   const keyRow = (k) => `<button class="li" data-key="${k}">${ico('key')}<div>${esc(KEYS[k].name)}<small>${sec[k] ? 'Ключ задан' : k === 'tmdb' ? 'Общий ключ Luma (можно ввести свой)' : 'Не задан'} · ${esc(KEYS[k].use)}</small></div></button>`;
   const [uh, us] = updText();
-  return `<h3 class="ph3" style="padding-left:0">Сервисы</h3><div class="list" style="padding:0">${['tmdb', 'omdb', 'mdblist', 'trakt'].map(keyRow).join('')}</div>
+  const ao = animeOnStatus();
+  return `<h3 class="ph3" style="padding-left:0">Сервисы</h3><div class="list" style="padding:0"><button class="li" id="aoRow">${ico('key')}<div>AnimeOn<small>${ao.connected ? 'Подключено: '+esc(ao.email || 'аккаунт') : 'Вход для просмотра · инструкция внутри'}</small></div></button>${['tmdb', 'omdb', 'mdblist', 'trakt'].map(keyRow).join('')}</div>
     <h3 class="ph3" style="padding-left:0;margin-top:14px">Данные</h3><div class="list" style="padding:0">
       <button class="li" id="syncRow">${ico('sync')}<div>Синхронизация<small>${S.group ? 'Группа устройств подключена' : 'Не подключено'} · последняя: ${esc(lastSyncText())}</small></div></button>
       <button class="li" id="clr">${ico('trash')}<div>Очистить историю<small>Список «Продолжить просмотр» и отметки серий</small></div></button></div>
     <h3 class="ph3" style="padding-left:0;margin-top:14px">Приложение</h3><div class="list" style="padding:0">
-      <button class="li" id="updRow" data-act="updcheck">${ico('info')}<div>${esc(uh)}<small>${esc(us)}</small></div></button></div>
+      <button class="li" id="updRow" data-act="updcheck">${ico('info')}<div>${esc(uh)}<small>${esc(us)}</small></div></button><button class="li" id="licensesRow">${ico('info')}<div>Открытые лицензии<small>Сведения о сторонних компонентах</small></div></button></div>
     <p class="about" style="padding-left:0">Luma для телефона ${esc(NATIVE ? NATIVE.version() : '')} · github.com/dmitrykirsh/luma-mobile</p>`;
 }
+function clearViewingHistory(){S.history.forEach(h=>goneMark('h',h.id));S.history=[];S.progress={};S.seen={};S.done={};if(S.extra?.syncForeign)S.extra.syncForeign.sourceHistory={};save();}
 function bindSettings(root) {
+  $('#aoRow',root).onclick = animeOnDialog;
   $$('[data-key]', root).forEach((b) => (b.onclick = () => keyDlg(b.dataset.key)));
   $('#syncRow', root).onclick = openSync;
-  $('#clr', root).onclick = () => { S.history.forEach((h) => goneMark('h', h.id)); S.history = []; S.progress = {}; S.seen = {}; S.done = {}; save(); toast('История очищена'); };
+  $('#clr', root).onclick = () => {const sheet=openSheet('<h3>Очистить историю?</h3><p class="sub">Будут удалены история просмотра, прогресс и отметки серий на этом устройстве.</p><div class="dbtns"><button class="btn" data-clear-cancel>Отмена</button><button class="btn primary" data-clear-confirm>Очистить</button></div>');$('[data-clear-cancel]',sheet).onclick=closeSheet;$('[data-clear-confirm]',sheet).onclick=()=>{clearViewingHistory();closeSheet();toast('История очищена');};};
+  $('#licensesRow', root).onclick = async()=>{const sheet=openSheet('<h3>Открытые лицензии</h3><p class="sub">ByeDPI · hufrea · MIT</p><pre class="mobile-license">Загрузка…</pre><button class="btn" data-license-close>Закрыть</button>');$('[data-license-close]',sheet).onclick=closeSheet;try{const r=await fetch('licenses/byedpi.txt');if(!r.ok)throw Error();const text=await r.text();if(sheet.isConnected)$('.mobile-license',sheet).textContent=text;}catch{if(sheet.isConnected)$('.mobile-license',sheet).textContent='Не удалось загрузить лицензию.';}};
   $('#updRow', root).onclick = (e) => { const a = e.currentTarget.dataset.act; if (a === 'updinstall') updInstall(); else updCheck(false); };
 }
 setTimeout(() => { updCheck(true); setInterval(() => updCheck(true), 6 * 3600e3); }, 15000);

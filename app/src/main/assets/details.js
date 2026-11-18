@@ -15,7 +15,7 @@ function popPage() {
   const el = PG.pop(); if (!el) return false;
   if (el._onClose) { try { el._onClose(); } catch {} }
   el.classList.add('out'); setTimeout(() => el.remove(), 260);
-  if (!PG.length) document.body.classList.remove('pgs');
+  if (!PG.length) { document.body.classList.remove('pgs'); if(typeof mobileLibraryRefreshIfNeeded==='function')mobileLibraryRefreshIfNeeded(); }
   return true;
 }
 const backBtn = () => `<button class="ib dback" data-back="1">${ico('back')}</button>`;
@@ -39,18 +39,18 @@ async function detailsPrefetch(d) {
   if (logo) { logo.className = 'logo-img'; logo.alt = d.name; }
   return { T, logo, rates };
 }
-async function openDetails(id, opts = {}) {
-  const pg = pushPage();
+async function openDetails(id, opts = {}, existingPg = null) {
+  const pg = existingPg || pushPage();
   pg.innerHTML = backBtn() + '<div class="spin" style="margin-top:40vh"></div>';
   let d;
-  try { d = await info(id); } catch { if (alivePg(pg)) pg.innerHTML = backBtn() + '<div class="empty" style="padding-top:40vh"><h3>Нет связи</h3><p>Не удалось открыть страницу.</p></div>'; return; }
+  try { d = await info(id); if (!d || typeof d !== 'object' || Array.isArray(d) || d.id == null) { cache.delete('/info/' + id); throw new Error('BAD_DETAILS'); } } catch { if (alivePg(pg)) { pg.innerHTML = backBtn() + '<div class="empty" style="padding-top:35vh"><h3>Не удалось открыть страницу</h3><p>Проверьте подключение и попробуйте ещё раз.</p><button class="btn" data-details-retry>Повторить</button></div>'; pg.querySelector('[data-details-retry]').onclick = () => openDetails(id, opts, pg); } return; }
   if (!alivePg(pg)) return;
   const pre = await Promise.race([detailsPrefetch(d).catch(() => null), wait(4500)]);
   if (!alivePg(pg)) return;
   const inf = d.info || {}, seasons = seasonsOf(d), serial = seasons.length > 0;
   const people = d.people || {};
   const X = { d, inf, seasons, serial, cur: null, tab: '', T: null, trailers: null, shots: [], recsP: null, pg };
-  const lastEp = () => { const h = S.history.find((x) => x.id === d.id); return h && h.season ? h : null; };
+  const lastEp = () => { const h = S.history.find((x) => String(x.id) === String(d.id)); return h && h.season ? h : null; };
   X.cur = (lastEp() && lastEp().season) || (seasons[0] && seasons[0].season);
   pg._x = X;
   if (pre && pre.T) { X.T = pre.T; X.shots = pre.T.shots || []; X.logoImg = pre.logo; X.rates = pre.rates; X.pre = true; }
@@ -63,19 +63,20 @@ async function openDetails(id, opts = {}) {
   X.tabs = tabs;
   const kp = Number(d.kp_rating) || 0, im = Number(d.imdb_rating) || 0;
   X.paintHead = () => {
-    const h = lastEp(), rsm = serial ? (h ? resumeInfo(d.id, h.season, h.episode) : null) : resumeInfo(d.id);
+    const h = serial ? lastEp() : S.history.find(x=>String(x.id)===String(d.id)),sourceId=h?.source==='vk'?h.vkId:h?.source==='rutube'?h.rutubeId:'',rsm=(h?.source==='vk'||h?.source==='rutube')?(sourceId?resumeInfo(mobileSourceProgressKey(h.source,sourceId,d.id,h.season,h.episode)):null):serial?(h?resumeInfo(d.id,h.season,h.episode):null):resumeInfo(d.id);
     const label = (rsm || (serial && h)) ? 'Продолжить' + (serial && h ? ` · ${h.season}×${h.episode}` : '') + (rsm ? ' · ' + fmtTime(rsm.t) : '') : 'Смотреть';
     const bd = X.T && X.T.backdrop ? TMI(X.T.backdrop, 'w1280') : (d.poster || '');
-    pg.querySelector('.dh')?.remove(); pg.querySelector('.da')?.remove();
+    pg.querySelector('.dh')?.remove(); pg.querySelector('.da')?.remove(); pg.querySelector('.mobile-source-bar')?.remove();
     pg.insertAdjacentHTML('afterbegin', `<div class="dh"><div class="bgp ${X.T && X.T.backdrop ? 'bd' : ''}" style="background-image:url('${esc(bd)}')"></div>
       <div class="in"><div class="poster">${poster(d)}</div><div class="meta"><div class="ty">${esc(TYPES[d.type] || '')}${inf.age ? ' · ' + esc(inf.age) + '+' : ''}</div><h1 id="dTitle">${esc(d.name)}</h1><div class="orig">${esc(d.origin_name || inf.name_eng || '')}</div>
         <div class="tags">${[d.year && `<span>${d.year}</span>`, inf.time && `<span>${esc(inf.time)}</span>`, serial && `<span>${seasons.length} сез.</span>`, ...(inf.country || []).slice(0, 2).map((c) => `<span>${esc(c)}</span>`), d.quality && `<span>${esc(d.quality)}</span>`].filter(Boolean).join('')}</div></div></div>
       <div class="rates" id="dRates">${kp ? rateChip('kp', rateCls(kp), kp.toFixed(1), 'Кинопоиск') : ''}${im ? rateChip('imdb', rateCls(im), im.toFixed(1), 'IMDb') : ''}</div>
       <div class="genres">${(inf.genre || []).map((g) => `<button class="gchip" data-genre="${esc(g)}">${esc(g)}</button>`).join('')}</div></div>
-      <div class="da"><button class="btn primary" id="dplay">${ico('play')} ${esc(label)}</button>${rsm ? `<button class="ib" id="dstart" title="С начала">${ico('restart')}</button>` : ''}<button class="ib ${isFav(d.id) ? 'on' : ''}" id="dfav">${ico('heart')}</button></div>`);
-    $('#dplay', pg).onclick = () => { const hh = lastEp(); if (serial) playItem(d, seasons, hh ? hh.season : seasons[0].season, hh ? hh.episode : seasons[0].episodes[0]); else playItem(d, seasons); };
-    $('#dstart', pg)?.addEventListener('click', () => { const hh = lastEp(); if (serial) playItem(d, seasons, hh ? hh.season : seasons[0].season, hh ? hh.episode : seasons[0].episodes[0], { fromStart: true }); else playItem(d, seasons, undefined, undefined, { fromStart: true }); });
-    $('#dfav', pg).onclick = () => { $('#dfav', pg).classList.toggle('on', toggleFav(d)); };
+      <div class="da"><button class="btn primary" id="dplay">${ico('play')} ${esc(label)}</button>${rsm ? `<button class="ib" id="dstart" title="С начала">${ico('restart')}</button>` : ''}<button class="ib ${isFav(d.id) ? 'on' : ''}" id="dfav" aria-label="${isFav(d.id) ? 'Убрать из избранного' : 'Добавить в избранное'}" aria-pressed="${isFav(d.id)}">${ico('heart')}</button></div><div class="mobile-source-bar"><span>Другие источники</span><button data-mobile-source="rutube"><img src="platforms/rutube-icon.svg" alt="">Rutube</button><button data-mobile-source="vk"><img src="platforms/vk-video.svg" alt="">VK Видео</button></div>`);
+    $('#dplay', pg).onclick = () => { const hh=serial?lastEp():S.history.find(x=>String(x.id)===String(d.id)),sourceId=hh?.source==='vk'?hh.vkId:hh?.source==='rutube'?hh.rutubeId:'';const sn=serial?(hh?.season||seasons[0].season):null,ep=serial?(hh?.episode||seasons[0].episodes[0]):null;if(sourceId)playMobileSource(hh.source,d,sn,ep,{id:sourceId,title:d.name});else if(hh?.source==='vk'||hh?.source==='rutube')openMobileSource(hh.source,d,sn,ep,seasons);else if(serial)playItem(d,seasons,sn,ep);else playItem(d,seasons); };
+    $('#dstart', pg)?.addEventListener('click', () => {const hh=serial?lastEp():S.history.find(x=>String(x.id)===String(d.id)),sourceId=hh?.source==='vk'?hh.vkId:hh?.source==='rutube'?hh.rutubeId:'',sn=serial?(hh?.season||seasons[0].season):null,ep=serial?(hh?.episode||seasons[0].episodes[0]):null;if(sourceId)playMobileSource(hh.source,d,sn,ep,{id:sourceId,title:d.name},{fromStart:true});else if(serial)playItem(d,seasons,sn,ep,{fromStart:true});else playItem(d,seasons,undefined,undefined,{fromStart:true});});
+    $('#dfav', pg).onclick = () => { const button = $('#dfav', pg), on = toggleFav(d); button.classList.toggle('on', on); button.setAttribute('aria-pressed', String(on)); button.setAttribute('aria-label', on ? 'Убрать из избранного' : 'Добавить в избранное'); };
+    $$('.mobile-source-bar [data-mobile-source]',pg).forEach(b=>b.onclick=()=>{const hh=lastEp(),season=serial?(hh?.season||seasons[0].season):null,episode=serial?(hh?.episode||seasons[0].episodes[0]):null;openMobileSource(b.dataset.mobileSource,d,season,episode,seasons);});
     $$('[data-genre]', pg).forEach((b) => (b.onclick = () => { catState.cat = SEC_CAT[d.type] ?? 0; catState.genre = b.dataset.genre; catState.sort = 0; while (PG.length) popPage(); switchTab('cat', true); }));
     if (X.rates) $('#dRates', pg).insertAdjacentHTML('beforeend', X.rates);
     if (X.logoImg) { const t = $('#dTitle', pg); t.textContent = ''; t.appendChild(X.logoImg.cloneNode()); t.classList.add('has-logo'); }
@@ -107,11 +108,13 @@ const PANELS = {
     $('#dmore', p)?.addEventListener('click', () => { $('#ddesc', p).classList.remove('cl'); $('#dmore', p).remove(); });
   },
   eps(p, X) {
-    const { d, seasons } = X, sObj = seasons.find((s) => s.season == X.cur) || seasons[0], h = S.history.find((x) => x.id === d.id);
+    const { d, seasons } = X, sObj = seasons.find((s) => s.season == X.cur) || seasons[0], h = S.history.find((x) => String(x.id) === String(d.id)),expanded=String(X.expandedSeason||'')===String(sObj.season),visible=expanded?sObj.episodes:sObj.episodes.slice(0,12),generation=X.episodeRender=(X.episodeRender||0)+1;
     p.innerHTML = `<div class="chips">${seasons.map((s) => `<button class="chip ${s.season == sObj.season ? 'on' : ''}" data-s="${s.season}">Сезон ${s.season}</button>`).join('')}</div>
-      <div class="eps">${sObj.episodes.map((e) => { const dn = isDone(d.id, sObj.season, e), pct = dn ? 0 : progressPct(d.id, sObj.season, e); return `<button class="ep ${dn ? 'done' : ''} ${h && h.season == sObj.season && h.episode == e ? 'cur' : ''}" data-e="${e}">${e}${pct ? `<i style="width:${pct}%"></i>` : ''}</button>`; }).join('')}</div>`;
-    $$('.chips [data-s]', p).forEach((b) => (b.onclick = () => { X.cur = b.dataset.s; X.tab = ''; selectTab(X, 'eps'); }));
-    $$('.ep', p).forEach((b) => (b.onclick = () => playItem(d, seasons, sObj.season, b.dataset.e)));
+      <div class="eps mobile-episode-grid">${visible.map((e) => { const dn = isDone(d.id, sObj.season, e), pct = dn ? 0 : mobileEpisodeProgressPct(d.id, sObj.season, e); return `<button class="ep mobile-episode ${dn ? 'done' : ''} ${h && h.season == sObj.season && h.episode == e ? 'cur' : ''}" data-e="${esc(e)}"><span class="mobile-episode-art"><span class="mobile-episode-play">▶</span>${pct ? `<i style="width:${pct}%"></i>` : ''}</span><span class="mobile-episode-copy"><b>Серия ${esc(e)}</b><small>${dn?'Просмотрено':h && h.season == sObj.season && h.episode == e?'Продолжить':'Смотреть'}</small></span></button>`; }).join('')}</div>${sObj.episodes.length>12?`<button class="ao-episodes-more" data-e-expand aria-expanded="${expanded}">${expanded?'Свернуть серии':'Все серии · '+sObj.episodes.length} <span>${expanded?'↑':'↓'}</span></button>`:''}`;
+    $('[data-e-expand]',p)?.addEventListener('click',()=>{X.expandedSeason=expanded?'':String(sObj.season);X.tab='';selectTab(X,'eps');if(expanded)p.scrollIntoView({block:'start'});});
+    $$('.chips [data-s]', p).forEach((b) => (b.onclick = () => { X.cur = b.dataset.s; X.expandedSeason=''; X.tab = ''; selectTab(X, 'eps'); }));
+    $$('.ep', p).forEach((b) => (b.onclick = () => {const h=S.history.find(x=>String(x.id)===String(d.id)&&String(x.season)===String(sObj.season)&&String(x.episode)===String(b.dataset.e)),id=h?.source==='vk'?h.vkId:h?.source==='rutube'?h.rutubeId:'';if(id)playMobileSource(h.source,d,sObj.season,b.dataset.e,{id,title:d.name});else playItem(d,seasons,sObj.season,b.dataset.e);}));
+    const season=String(sObj.season);(async()=>{const match=X.T||await tmFind(d);if(!alivePg(X.pg)||X.tab!=='eps'||X.episodeRender!==generation||String(X.cur)!==season||!match||match.kind!=='tv')return;const data=await tmdb('/tv/'+encodeURIComponent(match.tmdb)+'/season/'+encodeURIComponent(season));if(!alivePg(X.pg)||X.tab!=='eps'||X.episodeRender!==generation||String(X.cur)!==season)return;const rows=new Map((data.episodes||[]).map(x=>[String(x.episode_number),x]));$$('.mobile-episode',p).forEach(b=>{const ep=rows.get(String(b.dataset.e));if(!ep)return;const imgPath=ep.still_path;if(imgPath){const img=document.createElement('img');img.loading='lazy';img.alt='';img.onerror=()=>img.remove();img.src=TMI(imgPath,'w500');$('.mobile-episode-art',b).prepend(img);}if(ep.name&&!/^серия\s*\d+$/i.test(ep.name))$('.mobile-episode-copy small',b).textContent=ep.name;});})().catch(()=>{});
   },
   async trailers(p, X) {
     p.innerHTML = '<div class="spin"></div>';
@@ -181,17 +184,27 @@ async function detailsEnhance(X) {
 }
 
 /* ---------- трейлеры и кадры ---------- */
+let mobileYoutubePage=null;
+function openMobileYoutube(id){if(!/^[\w-]{11}$/.test(String(id||'')))return;const pg=pushPage();mobileYoutubePage={pg,id};pg.innerHTML=`${backBtn()}<div class="mobile-youtube"><span>YOUTUBE · В LUMA</span><h1>Просмотр видео</h1><div class="mobile-youtube-player"><div class="mobile-youtube-message">Подключаем видео…</div></div><button class="btn" data-youtube-external>Открыть в YouTube ↗</button></div>`;pg.querySelector('[data-youtube-external]').onclick=()=>{popPage();NATIVE?.openYoutube(id);};pg._onClose=()=>{if(mobileYoutubePage?.pg===pg)mobileYoutubePage=null;NATIVE?.clearYoutubeEmbed?.();};if(NATIVE?.prepareYoutubeEmbed)NATIVE.prepareYoutubeEmbed(id);else window.lumaMobileYoutubeReady(id,false);}
+window.lumaMobileYoutubeReady=(id,ok)=>{const current=mobileYoutubePage;if(!current||current.id!==id||!alivePg(current.pg))return;const host=current.pg.querySelector('.mobile-youtube-player');if(!host)return;if(!ok){host.innerHTML='<div class="mobile-youtube-message"><span>Не удалось подключить видео.</span><button class="mobile-search-retry" data-youtube-retry>Повторить</button></div>';host.querySelector('[data-youtube-retry]').onclick=()=>{host.innerHTML='<div class="mobile-youtube-message">Подключаем видео…</div>';if(NATIVE?.prepareYoutubeEmbed)NATIVE.prepareYoutubeEmbed(id);else window.lumaMobileYoutubeReady(id,false);};return;}host.innerHTML=`<iframe title="YouTube" src="https://www.youtube-nocookie.com/embed/${encodeURIComponent(id)}?autoplay=1&amp;playsinline=1&amp;rel=0&amp;enablejsapi=1" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe>`;};
+window.lumaYoutubePause=()=>{const f=mobileYoutubePage?.pg.querySelector('.mobile-youtube-player iframe');f?.contentWindow?.postMessage(JSON.stringify({event:'command',func:'pauseVideo',args:[]}), 'https://www.youtube-nocookie.com');};
 function openTrailer(t) {
-  if (t.src === 'YouTube' && NATIVE && NATIVE.openYoutube) { NATIVE.openYoutube(t.id); return; }
+  if (t.src === 'YouTube' && NATIVE && NATIVE.openYoutube) { openMobileYoutube(t.id); return; }
   if (t.src === 'Rutube') { playTrailer(t); return; }
   if (NATIVE && NATIVE.openUrl) NATIVE.openUrl(t.url);
 }
 function openLightbox(list, i) {
-  const pg = pushPage(); pg.classList.add('lbx'); let k = i;
-  const show = (d) => { k = (k + d + list.length) % list.length; $('img', pg).src = list[k]; $('.n', pg).textContent = (k + 1) + ' / ' + list.length; };
-  pg.innerHTML = `${backBtn()}<img alt=""><div class="n"></div>`;
-  let x0 = null;
-  pg.addEventListener('pointerdown', (e) => { x0 = e.clientX; });
-  pg.addEventListener('pointerup', (e) => { if (x0 == null) return; const dx = e.clientX - x0; x0 = null; if (Math.abs(dx) > 50) show(dx < 0 ? 1 : -1); });
+  if (!Array.isArray(list) || !list.length) return;
+  const pg = pushPage(); pg.classList.add('lbx'); let k = Math.max(0, Math.min(list.length - 1, Number(i) || 0));
+  pg.innerHTML = `${backBtn()}<img alt=""><div class="lbx-error" hidden><span>Не удалось загрузить кадр</span><button class="btn" data-lbx-retry>Повторить</button></div><div class="lbx-nav"><button data-lbx-prev aria-label="Предыдущий кадр">‹</button><div class="n" aria-live="polite"></div><button data-lbx-next aria-label="Следующий кадр">›</button></div>`;
+  const img = $('img', pg), error = $('.lbx-error', pg), prev = $('[data-lbx-prev]', pg), next = $('[data-lbx-next]', pg);
+  const show = (d) => { k = (k + d + list.length) % list.length; error.hidden = true; img.hidden = false; img.alt = `Кадр ${k + 1} из ${list.length}`; img.src = list[k]; $('.n', pg).textContent = (k + 1) + ' / ' + list.length; };
+  img.onload = () => { error.hidden = true; }; img.onerror = () => { img.hidden = true; error.hidden = false; };
+  prev.hidden = next.hidden = list.length < 2; prev.onclick = () => show(-1); next.onclick = () => show(1); $('[data-lbx-retry]', pg).onclick = () => show(0);
+  let start = null;
+  pg.addEventListener('pointerdown', (e) => { if (!e.target.closest('button')) start = { id:e.pointerId, x:e.clientX, y:e.clientY }; });
+  pg.addEventListener('pointerup', (e) => { if (!start || start.id !== e.pointerId) return; const dx = e.clientX - start.x, dy = e.clientY - start.y; start = null; if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.2) show(dx < 0 ? 1 : -1); });
+  pg.addEventListener('pointercancel', () => { start = null; });
+  pg.addEventListener('keydown', (e) => { if (list.length > 1 && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) { e.preventDefault(); show(e.key === 'ArrowLeft' ? -1 : 1); } });
   show(0);
 }

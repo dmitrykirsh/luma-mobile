@@ -1,0 +1,200 @@
+'use strict';
+/* Данные AnimeOn. Интерфейс и плеер подключаются отдельными этапами. */
+const AO_MOBILE_HOSTS = ['https://api.animeon.cloud', 'https://api.animeon.co'];
+const aoMobileCache = new Map();
+let aoMobileHost = AO_MOBILE_HOSTS[0];
+function aoMobileImage(path) {
+  if (typeof path !== 'string') return '';
+  const url=path.startsWith('//')?'https:'+path:path.startsWith('/')?aoMobileHost+path:path;
+  try { return new URL(url).protocol==='https:'?url:''; } catch { return ''; }
+}
+function aoMobileResponseValid(path, value) {
+  if (!value || typeof value !== 'object') return false;
+  const field = path.startsWith('/api/anime?') ? 'items' : path === '/api/anime/filters' ? 'genres' : path.startsWith('/api/search?') ? 'results' : /^\/api\/collections(?:\/search)?\?/.test(path) ? 'collections' : '';
+  return !field || Array.isArray(value[field]);
+}
+async function aoMobileGet(path, ttl = 120000) {
+  const cached = aoMobileCache.get(path);
+  if (cached && Date.now() - cached.at < ttl && aoMobileResponseValid(path, cached.value)) return cached.value;
+  if (cached) aoMobileCache.delete(path);
+  let error;
+  for (const host of [aoMobileHost, ...AO_MOBILE_HOSTS.filter(h => h !== aoMobileHost)]) {
+    try {
+      const response = await fetch(tvPx(host + path, '', '', true), { signal: AbortSignal.timeout(10000) });
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      const value = await response.json();
+      if (!aoMobileResponseValid(path, value)) throw new Error('BAD_RESPONSE');
+      aoMobileHost = host;
+      aoMobileCache.set(path, {at: Date.now(), value});
+      return value;
+    } catch (e) { error = e; }
+  }
+  throw error || new Error('AnimeOn недоступен');
+}
+function aoMobileCompact(item) {
+  const md = item?.material_data || {};
+  const kind = String(item?.kind || md.anime_kind || '').toLowerCase();
+  const image = item?.poster || item?.anime_poster || md.anime_poster || '';
+  const poster = aoMobileImage(image);
+  const year = Number(item?.year) || Number(String(md.aired_at || item?.aired_at || '').slice(0, 4)) || 0;
+  return { id: 'ao:' + (item?.anime_url || ''), name: item?.title || md.anime_title || '', origin_name: item?.title_orig || md.title_en || '', type: ['movie', 'anime', 'music'].includes(kind) ? 6 : 7, year, poster, kp_rating: Number(md.kinopoisk_rating) || 0, imdb_rating: Number(md.imdb_rating) || 0, status: item?.status || '' };
+}
+async function aoMobileCatalog({page = 1, limit = 24, sort = 'popular', status = '', genre = ''} = {}) {
+  const params = new URLSearchParams({page: String(Math.max(1, page)), limit: String(Math.min(48, Math.max(8, limit))), sort: ['popular', 'rating', 'year'].includes(sort) ? sort : 'popular'});
+  if (sort === 'rating') params.set('order', 'desc');
+  if (status) params.set('status', status);
+  if (genre) params.set('genre', genre);
+  const data = await aoMobileGet('/api/anime?' + params);
+  return {items: (data.items || []).filter(x => x?.anime_url).map(aoMobileCompact), total: Number(data.total_count) || 0};
+}
+async function aoMobileDetails(slug) {
+  if (!/^[a-z0-9_-]{1,200}$/i.test(String(slug))) throw new Error('Некорректный адрес аниме');
+  const path = '/api/anime/' + encodeURIComponent(slug), value = await aoMobileGet(path, 600000);
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !(value.title || value.material_data?.anime_title)) { aoMobileCache.delete(path); throw new Error('BAD_DETAILS'); }
+  return value;
+}
+async function aoMobileGenres() {
+  const data = await aoMobileGet('/api/anime/filters', 3600000);
+  return (Array.isArray(data.genres) ? data.genres : []).filter(x => typeof x === 'string' && x.trim()).map(x => x.trim());
+}
+async function aoMobileSearch(query) {
+  const text = String(query || '').trim();
+  if (!text) return [];
+  const data = await aoMobileGet('/api/search?q=' + encodeURIComponent(text), 60000);
+  return (data.results || []).filter(x => x?.anime_url).map(aoMobileCompact);
+}
+async function aoMobileCollections({page = 1, query = '', sort = 'popular', tag = ''} = {}) {
+  const text = String(query).trim();
+  const params = new URLSearchParams({page: String(Math.max(1, Number(page) || 1)), limit: '24'});
+  if (text) params.set('q', text); else params.set('sort', sort === 'new' ? 'new' : 'popular');
+  if (!text && /^[a-z0-9-]{1,80}$/.test(tag)) params.set('tag', tag);
+  const data = await aoMobileGet((text ? '/api/collections/search?' : '/api/collections?') + params, 60000);
+  return {total: Number(data.total) || 0, items: (data.collections || []).map(c => ({slug: c.slug, title: c.title, author: c.owner_username, count: c.items_count, description: c.short_description || c.description || '', covers: (c.cover_items || []).map(aoMobileCompact)}))};
+}
+async function aoMobileCollection(slug) {
+  if (!/^[a-z0-9_-]{1,200}$/i.test(String(slug))) throw new Error('Некорректный адрес подборки');
+  const path = '/api/collections/' + encodeURIComponent(slug), data = await aoMobileGet(path, 60000);
+  if (!data.collection || typeof data.collection !== 'object' || Array.isArray(data.collection)) { aoMobileCache.delete(path); throw new Error('Подборка не найдена'); }
+  const c = data.collection;
+  return {slug: c.slug, title: c.title, author: c.owner_username, description: c.description || '', count: c.items_count, items: (c.items || []).map(x => aoMobileCompact(x.anime || {})).filter(x => x.id !== 'ao:')};
+}
+
+function aoMobileCard(item) {
+  return `<button class="card ao-card" data-ao-slug="${esc(String(item.id).slice(3))}"><div class="pos"><i>${esc([...(item.name || '?')][0])}</i>${poster(item)}</div><b>${esc(item.name)}</b><span class="m">${esc([item.year, TYPES[item.type]].filter(Boolean).join(' · '))}</span></button>`;
+}
+async function openAoMobileCatalog() {
+  const pg = pushPage();
+  pg.innerHTML = `${backBtn()}<div class="ao-mobile-head"><span>ANIMEON</span><h1>Аниме</h1><p>Онгоинги, рейтинги и подборки сообщества.</p><label class="ao-mobile-search"><input type="search" placeholder="Найти аниме" autocomplete="off" enterkeyhint="search" aria-label="Поиск аниме"></label><div class="ao-mobile-actions"><button class="ao-mobile-collections" data-ao-genres>Все жанры <i>›</i></button><button class="ao-mobile-collections" data-ao-collections>Подборки <i>›</i></button></div></div><div class="ao-mobile-search-results" hidden></div><div class="ao-mobile-rows"><div class="spin"></div></div>`;
+  $('[data-ao-collections]', pg).onclick = openAoMobileCollections;
+  $('[data-ao-genres]', pg).onclick = () => openAoMobileGenres();
+  const body = $('.ao-mobile-rows', pg), input=$('.ao-mobile-search input',pg), results=$('.ao-mobile-search-results',pg);
+  body.addEventListener('click', e => { const feed=e.target.closest('[data-ao-feed]');if(feed){openAoMobileGenreResults([],{title:feed.dataset.aoFeed==='ongoing'?'Онгоинги':'Высокий рейтинг',status:feed.dataset.aoFeed==='ongoing'?'ongoing':'',sort:feed.dataset.aoFeed==='rating'?'rating':'popular'});return;}const b = e.target.closest('[data-ao-slug]'); if (b) openAoMobileDetails(b.dataset.aoSlug); });
+  results.addEventListener('click', e => {const b=e.target.closest('[data-ao-slug]');if(b){input.blur();openAoMobileDetails(b.dataset.aoSlug);}});
+  let searchTimer=0, searchSeq=0;
+  input.addEventListener('input',()=>{clearTimeout(searchTimer);const q=input.value.trim(),seq=++searchSeq;if(q.length<2){results.hidden=true;body.hidden=false;return;}results.hidden=false;body.hidden=true;results.innerHTML='<div class="spin"></div>';searchTimer=setTimeout(async()=>{try{const items=await aoMobileSearch(q);if(!alivePg(pg)||seq!==searchSeq)return;results.innerHTML=items.length?`<div class="grid ao-collection-grid">${items.map(aoMobileCard).join('')}</div>`:'<div class="empty"><h3>Ничего не найдено</h3><p>Попробуйте другое название.</p></div>';}catch{if(alivePg(pg)&&seq===searchSeq)results.innerHTML='<div class="empty"><h3>Поиск недоступен</h3><p>Попробуйте ещё раз.</p></div>'; }},350);});
+  pg._onClose=()=>{clearTimeout(searchTimer);searchSeq++;};
+  const load=async()=>{body.innerHTML='<div class="spin"></div>';try {
+    const [ongoing, rating] = await Promise.all([aoMobileCatalog({status:'ongoing'}), aoMobileCatalog({sort:'rating'})]);
+    if (!alivePg(pg)) return;
+    body.innerHTML = [[ 'Онгоинги', ongoing.items, 'ongoing' ], [ 'Высокий рейтинг', rating.items, 'rating' ]].map(([title, items, feed]) => items.length ? `<section class="sec"><h2>${esc(title)}<button class="ao-feed-more" data-ao-feed="${feed}">Все ›</button></h2><div class="row">${items.map(aoMobileCard).join('')}</div></section>` : '').join('') || '<div class="empty"><h3>Пока нет данных</h3><p>Попробуйте открыть раздел позже.</p></div>';
+  } catch {
+    if (alivePg(pg)) { body.innerHTML = '<div class="empty"><h3>AnimeOn недоступен</h3><p>Проверьте подключение и попробуйте ещё раз.</p><button class="btn" data-ao-catalog-retry>Повторить</button></div>'; body.querySelector('[data-ao-catalog-retry]').onclick=load; }
+  }}; await load();
+}
+async function openAoMobileGenres(initial=[], onApply=null) {
+  const sheet = openSheet('<h3>Жанры аниме</h3><p class="sub">Выберите один или несколько жанров.</p><label class="ao-mobile-search"><input type="search" data-ao-genre-search placeholder="Найти жанр" aria-label="Найти жанр" autocomplete="off"></label><div class="ao-genre-list"><div class="spin"></div></div><div class="dbtns"><button class="btn" data-ao-clear>Сбросить</button><button class="btn primary" data-ao-apply>Показать</button></div>');
+  const options = $('.ao-genre-list', sheet), selected = new Set(initial);
+  try {
+    const genres = await aoMobileGenres();
+    if (!sheet.isConnected) return;
+    options.innerHTML = genres.map((g,i)=>`<button class="chip ao-genre ${selected.has(g)?'on':''}" data-ao-genre="${i}" aria-pressed="${selected.has(g)}">${esc(g)}</button>`).join('');
+    $('[data-ao-genre-search]',sheet).oninput=e=>{const q=e.target.value.trim().toLocaleLowerCase('ru-RU');options.querySelectorAll('[data-ao-genre]').forEach(b=>{b.hidden=!!q&&!genres[Number(b.dataset.aoGenre)].toLocaleLowerCase('ru-RU').includes(q);});};
+    options.onclick = e => {const b=e.target.closest('[data-ao-genre]');if(!b)return;const g=genres[Number(b.dataset.aoGenre)];if(selected.has(g))selected.delete(g);else selected.add(g);b.classList.toggle('on',selected.has(g));b.setAttribute('aria-pressed',String(selected.has(g)));};
+    $('[data-ao-clear]',sheet).onclick = () => {selected.clear();options.querySelectorAll('.on').forEach(b=>{b.classList.remove('on');b.setAttribute('aria-pressed','false');});};
+    $('[data-ao-apply]',sheet).onclick = () => {const genres=[...selected];closeSheet();if(onApply)onApply(genres);else openAoMobileGenreResults(genres);};
+  } catch { if(sheet.isConnected) options.innerHTML='<p class="sub">Не удалось загрузить жанры.</p>'; }
+}
+async function openAoMobileGenreResults(genres, options={}) {
+  const pg=pushPage(), label=options.title||(genres.length?genres.join(' · '):'Все жанры');
+  pg.innerHTML=`${backBtn()}<div class="ao-mobile-head"><span>${options.title?'ANIMEON':'ANIMEON · ЖАНРЫ'}</span><h1>${esc(label)}</h1><p>${options.title?'Каталог аниме AnimeOn.':'Аниме по выбранным жанрам.'}</p>${!options.title?'<div class="ao-mobile-actions"><button class="ao-mobile-collections" data-ao-edit-genres>Изменить жанры <i>›</i></button></div>':''}</div><div class="grid ao-collection-grid" id="aoGenreGrid"></div><div class="ao-genre-more"><div class="spin"></div></div>`;
+  $('[data-ao-edit-genres]',pg)?.addEventListener('click',()=>openAoMobileGenres(genres,next=>{if(PG.at(-1)!==pg)return;popPage();openAoMobileGenreResults(next);}));
+  const grid=$('#aoGenreGrid',pg),more=$('.ao-genre-more',pg),seen=new Set();let page=1,busy=false,done=false,observer,emptyRuns=0,blocked=false;
+  pg.addEventListener('click',e=>{const b=e.target.closest('[data-ao-slug]');if(b)openAoMobileDetails(b.dataset.aoSlug);});
+  const load=async()=>{if(busy||done||blocked||!alivePg(pg))return;busy=true;let advanced=false;try{const result=await aoMobileCatalog({page,genre:genres.join(','),status:options.status||'',sort:options.sort||'popular'});if(!alivePg(pg))return;const fresh=result.items.filter(item=>{const id=String(item.id);if(seen.has(id))return false;seen.add(id);return true;});if(result.items.length){page++;advanced=true;}if(fresh.length){emptyRuns=0;grid.insertAdjacentHTML('beforeend',fresh.map(aoMobileCard).join(''));}else if(result.items.length)emptyRuns++;done=!result.items.length||(result.total>0&&(page-1)*24>=result.total);blocked=!done&&emptyRuns>=3;more.innerHTML=done?(grid.children.length?'':'<p class="sub">Ничего не найдено.</p>'):blocked?'<button class="btn" data-ao-retry>Искать дальше</button>':'<div class="spin"></div>';if(blocked)more.querySelector('button').onclick=()=>{blocked=false;emptyRuns=0;load();};if(done)observer?.disconnect();}catch{if(alivePg(pg)){blocked=true;more.innerHTML='<button class="btn" data-ao-retry>Повторить загрузку</button>';more.querySelector('button').onclick=()=>{blocked=false;load();};}}finally{busy=false;if(advanced&&!done&&!blocked&&alivePg(pg))requestAnimationFrame(()=>{if(alivePg(pg)&&more.getBoundingClientRect().top<pg.getBoundingClientRect().bottom+400)load();});}};
+  observer=new IntersectionObserver(entries=>{if(entries[0].isIntersecting)load();},{root:pg,rootMargin:'400px'});observer.observe(more);pg._onClose=()=>observer.disconnect();await load();
+}
+async function openAoMobileCollections() {
+  const pg=pushPage();
+  pg.innerHTML=`${backBtn()}<div class="ao-mobile-head"><span>ANIMEON</span><h1>Подборки сообщества</h1><p>Аниме, собранное зрителями по темам и настроению.</p><label class="ao-mobile-search"><input type="search" placeholder="Найти подборку" autocomplete="off" aria-label="Поиск подборки"></label></div><div class="ao-mobile-list"></div><div class="ao-genre-more"><div class="spin"></div></div>`;
+  const host=$('.ao-mobile-list',pg),more=$('.ao-genre-more',pg),input=$('.ao-mobile-search input',pg),seen=new Set();let page=1,busy=false,done=false,seq=0,timer=0,observer,emptyRuns=0,blocked=false;
+  host.addEventListener('click',e=>{const b=e.target.closest('[data-ao-collection]');if(b)openAoMobileCollection(b.dataset.aoCollection);});
+  const load=async()=>{if(busy||done||blocked||!alivePg(pg))return;busy=true;const current=seq,query=input.value.trim();let advanced=false;try{const result=await aoMobileCollections({page,query});if(!alivePg(pg)||current!==seq)return;const fresh=result.items.filter(c=>{const id=String(c.slug||'');if(!id||seen.has(id))return false;seen.add(id);return true;});if(result.items.length){page++;advanced=true;}if(fresh.length){emptyRuns=0;host.insertAdjacentHTML('beforeend',fresh.map(c=>`<button class="ao-collection-card" data-ao-collection="${esc(c.slug)}"><span class="ao-collection-covers">${c.covers.slice(0,3).map(x=>poster(x)).join('')}</span><span class="ao-collection-copy"><b>${esc(c.title)}</b><small>${esc([c.author,c.count!=null?c.count+' тайтлов':''].filter(Boolean).join(' · '))}</small></span><i>›</i></button>`).join(''));}else if(result.items.length)emptyRuns++;done=!result.items.length||(result.total>0&&(page-1)*24>=result.total);blocked=!done&&emptyRuns>=3;more.innerHTML=done?(host.children.length?'':'<p class="sub">Подборок не найдено.</p>'):blocked?'<button class="btn" data-ao-retry>Искать дальше</button>':'<div class="spin"></div>';if(blocked)more.querySelector('button').onclick=()=>{blocked=false;emptyRuns=0;load();};if(done)observer?.disconnect();}catch{if(alivePg(pg)&&current===seq){blocked=true;more.innerHTML='<button class="btn" data-ao-retry>Повторить загрузку</button>';more.querySelector('button').onclick=()=>{blocked=false;load();};}}finally{if(current===seq){busy=false;if(advanced&&!done&&!blocked&&alivePg(pg))requestAnimationFrame(()=>{if(alivePg(pg)&&current===seq&&more.getBoundingClientRect().top<pg.getBoundingClientRect().bottom+400)load();});}}};
+  observer=new IntersectionObserver(entries=>{if(entries[0].isIntersecting)load();},{root:pg,rootMargin:'400px'});observer.observe(more);
+  input.addEventListener('input',()=>{clearTimeout(timer);seq++;busy=false;done=false;blocked=false;emptyRuns=0;page=1;seen.clear();host.innerHTML='';more.innerHTML='<div class="spin"></div>';observer.disconnect();timer=setTimeout(()=>{if(!alivePg(pg))return;observer.observe(more);load();},350);});
+  pg._onClose=()=>{seq++;clearTimeout(timer);observer.disconnect();};await load();
+}
+async function openAoMobileCollection(slug, existingPg = null) {
+  const pg = existingPg || pushPage();
+  pg.innerHTML = backBtn() + '<div class="spin" style="margin-top:40vh"></div>';
+  try {
+    const data = await aoMobileCollection(slug);
+    if (!alivePg(pg)) return;
+    pg.innerHTML = `${backBtn()}<div class="ao-mobile-head"><span>ПОДБОРКА · ANIMEON</span><h1>${esc(data.title)}</h1><p>${esc([data.author, data.count != null ? data.count+' тайтлов' : ''].filter(Boolean).join(' · '))}</p>${data.description ? `<p class="ao-collection-description">${esc(data.description)}</p><button class="mobile-list-expand" data-ao-collection-expand aria-expanded="false" hidden>Читать полностью</button>` : ''}</div><div class="grid ao-collection-grid">${data.items.map(aoMobileCard).join('')}</div>`;
+    const desc=pg.querySelector('.ao-collection-description'),expand=pg.querySelector('[data-ao-collection-expand]'); if (desc && expand) { const measure=()=>{if(!desc.classList.contains('expanded'))expand.hidden=desc.scrollHeight<=desc.clientHeight+1;}; measure(); if(typeof ResizeObserver!=='undefined'){const observer=new ResizeObserver(measure);observer.observe(desc);pg._onClose=()=>observer.disconnect();} expand.onclick=()=>{const on=desc.classList.toggle('expanded');expand.setAttribute('aria-expanded',String(on));expand.textContent=on?'Свернуть описание':'Читать полностью';if(!on)measure();}; }
+    pg.onclick = e => {const b=e.target.closest('[data-ao-slug]');if(b)openAoMobileDetails(b.dataset.aoSlug);};
+  } catch { if (alivePg(pg)) { pg.innerHTML=backBtn()+'<div class="empty" style="padding-top:35vh"><h3>Не удалось открыть подборку</h3><p>Проверьте подключение и попробуйте ещё раз.</p><button class="btn" data-ao-collection-retry>Повторить</button></div>'; pg.querySelector('[data-ao-collection-retry]').onclick=()=>openAoMobileCollection(slug,pg); } }
+}
+const aoMobileMatchName=x=>String(x||'').replace(/\[[^\]]*\]/g,' ').normalize('NFKC').toLocaleLowerCase('ru-RU').replace(/ё/g,'е').replace(/[^a-zа-я0-9]+/g,' ').trim();
+async function aoMobileRecommendations(item,excluded=[],stillActive=()=>true){
+  const kind=Number(item.type)===6?'movie':'tv',year=Number(item.year)||0,names=[...new Set([item.name,item.origin_name].map(aoMobileMatchName).filter(Boolean))],queries=[...new Set([String(item.name||'').replace(/\[[^\]]*\]/g,' ').trim(),item.origin_name].filter(Boolean))],candidates=new Map();
+  for(const q of queries){if(!stillActive())return [];const params={query:q};if(year)params[kind==='tv'?'first_air_date_year':'year']=year;const j=await tmdb('/search/'+kind,params);for(const x of j.results||[]){const actual=[x.name,x.title,x.original_name,x.original_title].map(aoMobileMatchName).filter(Boolean),y=Number(String(x.first_air_date||x.release_date||'').slice(0,4))||0;if(names.some(n=>actual.includes(n))&&(!year||y===year))candidates.set(String(x.id),x);}}
+  const ranked=[...candidates.values()].sort((a,b)=>(Number(b.popularity)||0)-(Number(a.popularity)||0));if(ranked.length!==1)return [];
+  const detail=await tmdb('/'+kind+'/'+ranked[0].id,{append_to_response:'recommendations'}),list=(detail.recommendations?.results||[]).slice(0,16),results=new Array(list.length);let next=0;
+  await Promise.all(Array.from({length:Math.min(4,list.length)},async()=>{while(next<list.length&&stillActive()){const i=next++,x=list[i],wanted=[x.name,x.title,x.original_name,x.original_title].map(aoMobileMatchName).filter(Boolean),y=Number(String(x.first_air_date||x.release_date||'').slice(0,4))||0;for(const q of [...new Set([x.name||x.title,x.original_name||x.original_title].filter(Boolean))]){try{const matches=await aoMobileSearch(q),valid=matches.filter(v=>{const actual=[v.name,v.origin_name].map(aoMobileMatchName).filter(Boolean);return Number(v.type)===(kind==='movie'?6:7)&&wanted.some(n=>actual.includes(n))&&(!y||(v.year&&Math.abs(v.year-y)<=1));}),unique=new Map(valid.map(v=>[String(v.id),v]));if(unique.size===1){results[i]=unique.values().next().value;break;}}catch{}}}}));
+  const used=new Set([String(item.id),...excluded.map(String)]);return results.filter(x=>{if(!x||used.has(String(x.id)))return false;used.add(String(x.id));return true;}).slice(0,10);
+}
+
+async function openAoMobileDetails(slug, opts = {}, existingPg = null) {
+  const pg = existingPg || pushPage();
+  pg.innerHTML = backBtn() + '<div class="spin" style="margin-top:40vh"></div>';
+  try {
+    const raw = await aoMobileDetails(slug);
+    if (!alivePg(pg)) return;
+    const item = aoMobileCompact({...raw, anime_url: raw.anime_url || slug});
+    const md = raw.material_data || {};
+    const description = raw.description || md.anime_description || md.description || 'Описание пока недоступно.';
+    const genres = Array.isArray(raw.genres) ? raw.genres : Array.isArray(md.anime_genres) ? md.anime_genres : [];
+    const hosted=raw.self_hosted||{}, voices=hosted.translations||{};
+    const rating=Number(raw.animeon_rating?.average),ratingCount=Number(raw.animeon_rating?.count)||0,shiki=Number(md.shikimori_rating),studios=(Array.isArray(md.anime_studios)?md.anime_studios:[]).filter(x=>typeof x==='string'&&x.trim()).slice(0,2),duration=Number(md.duration)||0,trailer=/^[\w-]{11}$/.test(String(raw.trailer_id||''))?String(raw.trailer_id):'';
+
+    const episodes=[...new Set((Array.isArray(hosted.episodes)?hosted.episodes:[]).map(Number).filter(n=>Number.isInteger(n)&&n>0))].sort((a,b)=>a-b);
+    const franchise=(Array.isArray(raw.franchise?.nodes)?raw.franchise.nodes:[]).filter(x=>x?.anime_link&&x.slug&&String(x.id)!==String(raw.franchise.current_id)).map(x=>({id:'ao:'+x.slug,name:x.name||'',poster:aoMobileImage(x.poster_url||x.image_url||''),year:Number(x.year)||0,type:/^(movie|music)$/i.test(x.kind_key||x.kind||'')?6:7}));
+    const history=S.history.find(h=>String(h.id)===String(item.id)), last=Number(history?.episode), first=episodes.includes(last)?last:episodes[0];
+    item._ao={animeId:String(raw.id||''),translations:voices};
+    const seasons=[{season:'1',episodes}];
+    const stills=raw.episode_screenshots||{};
+    const backdrop=aoMobileImage((Object.values(stills).find(v=>Array.isArray(v)&&v.length)||[])[0]||'');
+    let allEpisodes=false;const episodeCard=n=>{const images=Array.isArray(stills[String(n)])?stills[String(n)]:[],image=images.map(aoMobileImage).find(Boolean)||'';return `<button class="ao-episode" data-ao-episode="${n}"><span class="ao-episode-art">${image?`<img src="${esc(image)}" loading="lazy" alt="" onerror="this.remove()">`:''}<span class="ao-episode-play">▶</span></span><span class="ao-episode-copy"><b>Серия ${n}</b><small>Озвучек: ${(voices[String(n)]||[]).length}</small></span></button>`;};
+    pg.innerHTML = `${backBtn()}<div class="ao-mobile-detail"><div class="ao-mobile-detail-top">${backdrop?`<img class="ao-detail-backdrop" src="${esc(backdrop)}" alt="" onerror="this.remove()">`:''}<div class="ao-mobile-poster">${poster(item)}</div><div class="ao-detail-meta"><span>ANIMEON</span><h1>${esc(item.name)}</h1><p>${esc([item.year, TYPES[item.type]].filter(Boolean).join(' · '))}</p><small>${esc(genres.filter(x=>typeof x==='string').slice(0,4).join(' · '))}</small></div></div>${(rating>0&&rating<=10)||(shiki>0&&shiki<=10)||studios.length||duration?`<div class="ao-detail-facts">${rating>0&&rating<=10?`<span><small>AnimeOn</small><b>${rating.toFixed(1)}</b>${ratingCount?`<em>${esc(ratingCount.toLocaleString('ru-RU'))} ${plural(ratingCount,'оценка','оценки','оценок')}</em>`:''}</span>`:''}${shiki>0&&shiki<=10?`<span><small>Shikimori</small><b>${shiki.toFixed(1)}</b></span>`:''}${studios.length||duration?`<span class="ao-detail-studio"><small>${studios.length?'Студия':'Длительность'}</small><b>${esc([studios.join(', '),duration?duration+' мин':''].filter(Boolean).join(' · '))}</b></span>`:''}</div>`:''}<div class="ao-mobile-play">${episodes.length?`<button class="btn primary" data-ao-play="${first}">${history?'Продолжить · серия '+first:'Смотреть · серия '+first}</button>`:''}<button class="ib ao-favorite ${isFav(item.id)?'on':''}" data-ao-favorite aria-label="${isFav(item.id)?'Убрать из избранного':'Добавить в избранное'}" aria-pressed="${isFav(item.id)}">${ico('heart')}</button></div>${episodes.length?`<h2 class="ao-episodes-title">Серии · ${episodes.length}</h2><div class="ao-episode-grid">${episodes.slice(0,12).map(episodeCard).join('')}</div>${episodes.length>12?`<button class="ao-episodes-more" data-ao-expand aria-expanded="false">Все серии · ${episodes.length} <span>↓</span></button>`:''}`:'<div class="ao-mobile-notice">Серии AnimeOn пока недоступны.</div>'}<h2>Об аниме</h2><p class="ao-mobile-description ${description.length>220?'cl':''}" data-ao-description>${esc(description)}</p>${description.length>220?'<button class="mobile-list-expand" data-ao-description-toggle aria-expanded="false">Читать полностью</button>':''}${trailer?'<button class="ao-trailer-button" data-ao-trailer>▶ Трейлер · YouTube ↗</button>':''}${/^\d{1,9}$/.test(String(raw.shikimori_id||''))?'<button class="ao-character-open" data-ao-characters>Персонажи <span>›</span></button>':''}${/^[a-f\d]{24}$/i.test(String(raw.id||''))?'<button class="ao-character-open" data-ao-reviews>Отзывы AnimeOn <span>›</span></button>':''}${franchise.length?`<h2>Другие части</h2><div class="row ao-franchise-row">${franchise.map(aoMobileCard).join('')}</div>`:''}<section class="ao-recs" hidden></section></div>`;
+    aoMobileRecommendations(item,franchise.map(x=>x.id),()=>alivePg(pg)).then(items=>{if(!alivePg(pg)||!items.length)return;const host=$('.ao-recs',pg);if(!host)return;host.hidden=false;host.innerHTML=`<h2>Похожее · TMDB</h2><div class="row ao-recommendations-row">${items.map(aoMobileCard).join('')}</div>`;}).catch(()=>{});
+    pg._refreshAo=()=>{const h=S.history.find(x=>String(x.id)===String(item.id)),n=Number(h?.episode),current=episodes.includes(n)?n:episodes[0],play=$('[data-ao-play]',pg);if(play&&current){play.dataset.aoPlay=String(current);play.textContent=h?'Продолжить · серия '+current:'Смотреть · серия '+current;}$$('[data-ao-episode]',pg).forEach(b=>{const ep=b.dataset.aoEpisode,sourceId=String(h?.episode)===ep?(h?.source==='vk'?h.vkId:h?.source==='rutube'?h.rutubeId:''):'',sourceProgress=sourceId?resumeInfo(mobileSourceProgressKey(h.source,sourceId,item.id,'1',ep)):null,pct=String(h?.episode)===ep&&(h?.source==='vk'||h?.source==='rutube')?(sourceProgress?Math.min(100,Math.round(sourceProgress.t/sourceProgress.d*100)):0):mobileEpisodeProgressPct(item.id,'1',ep),done=isDone(item.id,'1',ep);b.classList.toggle('ao-watched',done);let progress=b.querySelector('.ao-episode-progress');if(pct){if(!progress){progress=document.createElement('span');progress.className='ao-episode-progress';b.querySelector('.ao-episode-art').appendChild(progress);}progress.style.width=pct+'%';}else progress?.remove();});};
+    pg._refreshAo();
+    $('.ao-mobile-play',pg).insertAdjacentHTML('afterend','<div class="mobile-source-bar ao-source-bar"><span>Другие источники</span><button data-ao-source="rutube"><img src="platforms/rutube-icon.svg" alt="">Rutube</button><button data-ao-source="vk"><img src="platforms/vk-video.svg" alt="">VK Видео</button></div>');
+    $$('.ao-source-bar [data-ao-source]',pg).forEach(b=>b.onclick=()=>{const current=Number($('[data-ao-play]',pg)?.dataset.aoPlay)||episodes[0]||null;openMobileSource(b.dataset.aoSource,item,current?'1':null,current,seasons);});
+    pg.addEventListener('click', e => {const desc=e.target.closest('[data-ao-description-toggle]');if(desc){const p=$('[data-ao-description]',pg),expanded=p.classList.toggle('expanded');desc.setAttribute('aria-expanded',String(expanded));desc.textContent=expanded?'Свернуть описание':'Читать полностью';return;}if(e.target.closest('[data-ao-trailer]')){openTrailer({src:'YouTube',id:trailer});return;}if(e.target.closest('[data-ao-characters]')){openAoMobileCharacters(String(raw.shikimori_id),item.name);return;}if(e.target.closest('[data-ao-reviews]')){openAoMobileReviews(String(raw.id),item.name);return;}const expand=e.target.closest('[data-ao-expand]');if(expand){allEpisodes=!allEpisodes;expand.setAttribute('aria-expanded',String(allEpisodes));$('.ao-episode-grid',pg).innerHTML=(allEpisodes?episodes:episodes.slice(0,12)).map(episodeCard).join('');expand.innerHTML=allEpisodes?'Свернуть серии <span>↑</span>':'Все серии · '+episodes.length+' <span>↓</span>';pg._refreshAo?.();if(!allEpisodes)$('.ao-episodes-title',pg)?.scrollIntoView({block:'start'});return;}const related=e.target.closest('.ao-franchise-row [data-ao-slug],.ao-recommendations-row [data-ao-slug]');if(related){openAoMobileDetails(related.dataset.aoSlug);return;}const fav=e.target.closest('[data-ao-favorite]');if(fav){const on=toggleFav(item);fav.classList.toggle('on',on);fav.setAttribute('aria-pressed',String(on));fav.setAttribute('aria-label',on?'Убрать из избранного':'Добавить в избранное');return;}const play=e.target.closest('[data-ao-play]');if(play){const ep=Number(play.dataset.aoPlay),h=S.history.find(x=>String(x.id)===String(item.id)&&Number(x.episode)===ep),sourceId=h?.source==='vk'?h.vkId:h?.source==='rutube'?h.rutubeId:'';if(sourceId)playMobileSource(h.source,item,'1',ep,{id:sourceId,title:item.name});else if(h?.source==='vk'||h?.source==='rutube')openMobileSource(h.source,item,'1',ep,seasons);else playItem(item,seasons,'1',ep,{origin:pg});return;}const b=e.target.closest('[data-ao-episode]');if(!b)return;const n=Number(b.dataset.aoEpisode),list=Array.isArray(voices[String(n)])?voices[String(n)]:[],h=S.history.find(x=>String(x.id)===String(item.id)&&Number(x.episode)===n),sourceId=h?.source==='vk'?h.vkId:h?.source==='rutube'?h.rutubeId:'';const sheet=openSheet(`<h3>Серия ${n}</h3>${sourceId?`<button class="btn primary ao-resume-source" data-ao-resume-source>Продолжить · ${h.source==='vk'?'VK Видео':'Rutube'}</button>`:''}<p class="sub">Выберите озвучку AnimeOn.</p><div class="ao-genre-list">${list.map((v,i)=>`<button class="chip" data-ao-voice="${i}">${esc(v)}</button>`).join('')||'<p class="sub">Нет доступных озвучек.</p>'}</div>`);sheet.addEventListener('click',ev=>{if(ev.target.closest('[data-ao-resume-source]')){closeSheet();playMobileSource(h.source,item,'1',n,{id:sourceId,title:item.name});return;}const choice=ev.target.closest('[data-ao-voice]');if(!choice)return;const voice=list[Number(choice.dataset.aoVoice)];closeSheet();playItem(item,seasons,'1',n,{voice,origin:pg});});});
+    if(opts.autoplay)$('[data-ao-play]',pg)?.click();
+  } catch {
+    if (alivePg(pg)) { pg.innerHTML = backBtn() + '<div class="empty" style="padding-top:35vh"><h3>Не удалось открыть аниме</h3><p>Проверьте подключение и попробуйте ещё раз.</p><button class="btn" data-ao-details-retry>Повторить</button></div>'; pg.querySelector('[data-ao-details-retry]').onclick = () => openAoMobileDetails(slug, opts, pg); }
+  }
+}
+
+const aoShikiCache=new Map();
+async function aoShikiGet(path){const old=aoShikiCache.get(path);if(old&&Date.now()-old.at<3600000)return old.value;const r=await fetch(tvPx('https://shikimori.io/api/'+path,'Luma/1.0','',true),{signal:AbortSignal.timeout(12000)});if(!r.ok)throw Error('SHIKIMORI');const value=await r.json();aoShikiCache.set(path,{at:Date.now(),value});return value;}
+function aoShikiImage(path){if(!path)return '';try{const u=new URL(String(path),'https://shikimori.io');return u.protocol==='https:'&&u.hostname==='shikimori.io'&&!/\/assets\/globals\/missing_/i.test(u.pathname)?u.href:'';}catch{return '';}}
+async function openAoMobileCharacters(id,title,existingPg=null){if(!/^\d{1,9}$/.test(String(id)))return;const pg=existingPg||pushPage();pg.innerHTML=backBtn()+'<div class="spin" style="margin-top:40vh"></div>';let items;try{const data=await aoShikiGet('animes/'+id+'/roles');if(!Array.isArray(data))throw Error('FORMAT');const seen=new Set();items=data.filter(x=>x?.character?.id&&/^\d{1,9}$/.test(String(x.character.id))).map(x=>({id:String(x.character.id),name:String(x.character.russian||x.character.name||'Персонаж').slice(0,120),image:aoShikiImage(x.character.image?.preview),role:Array.isArray(x.roles)&&x.roles.includes('Main')?'Главный персонаж':'Персонаж'})).filter(x=>{if(seen.has(x.id))return false;seen.add(x.id);return true;});}catch{if(alivePg(pg)){pg.innerHTML=backBtn()+'<div class="empty" style="padding-top:35vh"><h3>Не удалось загрузить персонажей</h3><p>Проверьте подключение и попробуйте ещё раз.</p><button class="btn" data-character-retry>Повторить</button></div>';pg.querySelector('[data-character-retry]').onclick=()=>openAoMobileCharacters(id,title,pg);}return;}if(!alivePg(pg))return;
+  pg.innerHTML=`${backBtn()}<div class="mobile-catalog-head mobile-lists-head"><span>SHIKIMORI · ПЕРСОНАЖИ</span><div><h1>${esc(title)}</h1></div><p>${items.length} ${plural(items.length,'персонаж','персонажа','персонажей')}</p></div><label class="sbox"><input type="search" data-character-search placeholder="Найти персонажа" autocomplete="off" aria-label="Поиск персонажа"></label><p class="ao-character-count" data-character-count hidden></p><div class="ao-character-grid"></div><div class="ao-genre-more" data-character-more></div>`;const grid=$('.ao-character-grid',pg),more=$('[data-character-more]',pg),input=$('[data-character-search]',pg),count=$('[data-character-count]',pg);let shown=0,observer,timer=0,filtered=items;const append=()=>{if(!alivePg(pg)||shown>=filtered.length)return;const base=shown,part=filtered.slice(shown,shown+36);shown+=part.length;grid.insertAdjacentHTML('beforeend',part.map((x,i)=>`<button class="ao-character-card" data-ao-character="${base+i}"><span class="ao-character-art"><span>${esc([...(x.name||'?')][0])}</span>${x.image?`<img loading="lazy" src="${esc(tvPx(x.image))}" alt="" onload="this.parentElement.classList.add('has-image')" onerror="this.remove()">`:''}</span><b>${esc(x.name)}</b><small>${esc(x.role)}</small></button>`).join(''));if(shown>=filtered.length)observer?.disconnect();};observer=new IntersectionObserver(entries=>{if(entries[0].isIntersecting)append();},{root:pg,rootMargin:'400px'});const paint=()=>{observer.disconnect();shown=0;grid.innerHTML='';if(filtered.length){observer.observe(more);append();}else grid.innerHTML='<div class="empty">Персонажей не найдено.</div>';};input.oninput=()=>{clearTimeout(timer);timer=setTimeout(()=>{const q=input.value.trim().toLocaleLowerCase('ru-RU');filtered=q?items.filter(x=>x.name.toLocaleLowerCase('ru-RU').includes(q)):items;count.hidden=!q;count.textContent=q?'Найдено: '+filtered.length:'';paint();},200);};paint();grid.onclick=e=>{const b=e.target.closest('[data-ao-character]'),x=b&&filtered[Number(b.dataset.aoCharacter)];if(x)openAoMobileCharacter(x);};pg._onClose=()=>{clearTimeout(timer);observer?.disconnect();};}
+async function openAoMobileCharacter(x){const sheet=openSheet(`<span class="mobile-sport-overline">ПЕРСОНАЖ · SHIKIMORI</span><h3>${esc(x.name)}</h3><p class="sub">Описание загружается…</p><div class="ao-character-description" data-character-description></div><p class="sub">Описание может содержать спойлеры.</p><button class="btn" data-character-close>Закрыть</button>`);$('[data-character-close]',sheet).onclick=closeSheet;const hint=$('.sub',sheet),host=$('[data-character-description]',sheet);const load=async()=>{hint.textContent='Описание загружается…';try{const d=await aoShikiGet('characters/'+x.id);if(sheetEl!==sheet||!host.isConnected)return;const doc=new DOMParser().parseFromString(String(d.description_html||d.description||'').slice(0,30000),'text/html');doc.querySelectorAll('.b-spoiler_block,.b-spoiler,script,style').forEach(el=>el.remove());doc.querySelectorAll('br').forEach(el=>el.replaceWith('\n'));host.textContent=(doc.body.textContent||'').trim()||'Описание пока недоступно.';hint.remove();}catch{if(sheetEl===sheet&&host.isConnected){hint.textContent='Не удалось загрузить описание. ';const retry=document.createElement('button');retry.className='mobile-search-retry';retry.textContent='Повторить';retry.onclick=load;hint.appendChild(retry);}}};await load();}
+
+async function openAoMobileReviews(id,title){if(!/^[a-f\d]{24}$/i.test(String(id)))return;const pg=pushPage();pg.innerHTML=`${backBtn()}<div class="mobile-catalog-head mobile-lists-head"><span>ANIMEON · ОТЗЫВЫ</span><div><h1>${esc(title)}</h1></div><p>Мнения зрителей могут содержать спойлеры.</p></div><div class="ao-review-list"></div><div class="ao-genre-more" data-review-more><div class="spin"></div></div>`;const host=$('.ao-review-list',pg),more=$('[data-review-more]',pg),seen=new Set();let page=1,busy=false,done=false,observer,emptyRuns=0,blocked=false;
+  const load=async()=>{if(busy||done||blocked||!alivePg(pg))return;busy=true;let advanced=false;try{const params=new URLSearchParams({anime_id:id,page:String(page),limit:'20'}),result=await aoMobileGet('/api/comments?'+params,60000);if(!alivePg(pg))return;const raw=Array.isArray(result.comments)?result.comments:[];const fresh=raw.filter(c=>c&&!c.is_deleted&&c.body).filter(c=>{const key=String(c.id||'');if(!key||seen.has(key))return false;seen.add(key);return true;});if(raw.length){page++;advanced=true;}if(fresh.length){emptyRuns=0;host.insertAdjacentHTML('beforeend',fresh.map(c=>{const author=String(c.author_username||'Пользователь').slice(0,120),body=String(c.body||'').slice(0,5000),date=Date.parse(c.created_at),likes=Math.max(0,Number(c.likes_count)||0);return `<article class="ao-review-card"><div class="ao-review-head"><span>${esc([...author][0]||'?')}</span><div><b>${esc(author)}</b>${Number.isFinite(date)?`<small>${esc(new Date(date).toLocaleDateString('ru-RU'))}</small>`:''}</div><i>♥ ${esc(likes)}</i></div><p class="ao-review-text ${body.length>320?'cl':''}">${esc(body)}</p>${body.length>320?'<button data-review-expand aria-expanded="false">Читать полностью</button>':''}</article>`;}).join(''));}else if(raw.length)emptyRuns++;done=raw.length<20;blocked=!done&&emptyRuns>=3;more.innerHTML=done?(host.children.length?'':'<p class="sub">Отзывов пока нет.</p>'):blocked?'<button class="btn" data-review-retry>Загрузить дальше</button>':'<div class="spin"></div>';if(blocked)more.querySelector('button').onclick=()=>{blocked=false;emptyRuns=0;load();};if(done)observer?.disconnect();}catch{if(alivePg(pg)){blocked=true;more.innerHTML='<button class="btn" data-review-retry>Повторить загрузку</button>';more.querySelector('button').onclick=()=>{blocked=false;load();};}}finally{busy=false;if(advanced&&!done&&!blocked&&alivePg(pg))requestAnimationFrame(()=>{if(alivePg(pg)&&more.getBoundingClientRect().top<pg.getBoundingClientRect().bottom+400)load();});}};
+  host.onclick=e=>{const b=e.target.closest('[data-review-expand]');if(!b)return;const p=b.closest('.ao-review-card')?.querySelector('.ao-review-text'),expanded=p?.classList.toggle('expanded');b.setAttribute('aria-expanded',String(!!expanded));b.textContent=expanded?'Свернуть':'Читать полностью';};observer=new IntersectionObserver(entries=>{if(entries[0].isIntersecting)load();},{root:pg,rootMargin:'400px'});observer.observe(more);pg._onClose=()=>observer.disconnect();await load();}

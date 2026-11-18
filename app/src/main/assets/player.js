@@ -2,6 +2,10 @@
 /* Плеер Luma для телефона: видео играет нативный ExoPlayer под прозрачной страницей, а управление, меню и субтитры рисует этот интерфейс.
    Жесты: тап — панель, двойной тап — ±10 с или пауза, свайп вбок — перемотка, свайп вверх и вниз — громкость (справа) и яркость (слева). */
 const NP = { on: false, d: null, seasons: [], season: null, episode: null, key: '', data: null, src: null, prev: null, st: { p: 0, d: 0, pl: false, b: false, w: false }, menu: '', secs: [], audioNames: [], token: 0, ui: false, uiT: 0, lastSave: 0, subApplied: '', scrub: null, skipSec: null };
+let aoMobileRequestId=0, aoMobilePlaySequence=0;
+const aoMobilePending=new Map();
+window.lumaAnimeOnResolve=(id,raw)=>{const p=aoMobilePending.get(Number(id));if(!p)return;aoMobilePending.delete(Number(id));clearTimeout(p.timer);try{p.resolve(JSON.parse(raw));}catch{p.resolve({error:'NETWORK'});}};
+function aoMobileResolve(payload){return new Promise(resolve=>{const id=++aoMobileRequestId,timer=setTimeout(()=>{aoMobilePending.delete(id);resolve({error:'NETWORK'});},30000);aoMobilePending.set(id,{resolve,timer});try{NATIVE.aoResolveAsync(JSON.stringify(payload),id);}catch{clearTimeout(timer);aoMobilePending.delete(id);resolve({error:'NETWORK'});}});}
 const npFmt = (s) => { s = Math.max(0, Math.floor(s || 0)); const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = s % 60; return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(x).padStart(2, '0'); };
 const npPrefs = () => (S.player = S.player || {});
 const sprites = new Map();
@@ -24,8 +28,8 @@ function npDom() {
   el.innerHTML = `<div class="np-load"><div class="spin"></div></div><div class="np-buf hidden"><div class="spin"></div></div>
     <div class="np-touch" id="npTouch"></div><div class="np-shade"></div>
     <div class="np-fb l"></div><div class="np-fb r"></div><div class="np-hint hidden"></div>
-    <div class="np-top"><button class="np-ib" id="npBack">${NPI.back}</button><div class="np-title"><b></b><span></span></div></div>
-    <div class="np-mid"><button class="np-ib m" id="npPrev">${NPI.prev}</button><button class="np-ib big" id="npToggle">${NPI.pause}</button><button class="np-ib m" id="npNext">${NPI.next}</button></div>
+    <div class="np-top"><button class="np-ib" id="npBack" aria-label="Закрыть плеер">${NPI.back}</button><div class="np-title"><b></b><span></span></div></div>
+    <div class="np-mid"><button class="np-ib m" id="npPrev" aria-label="Предыдущее">${NPI.prev}</button><button class="np-ib big" id="npToggle" aria-label="Пауза">${NPI.pause}</button><button class="np-ib m" id="npNext" aria-label="Следующее">${NPI.next}</button></div>
     <div class="np-sub"></div>
     <div class="np-skip hidden"><button id="npSkip"><span></span></button></div>
     <div class="np-bot"><div class="np-seek" id="npSeek"><div class="np-thumb hidden"><div class="img"></div><span></span></div><div class="rail"><i class="pos"></i></div><b class="knob"></b></div>
@@ -43,10 +47,27 @@ function npDom() {
 }
 async function playItem(d, seasons, season, episode, opts = {}) {
   if (!NATIVE || !NATIVE.npStart) { toast('Плеер недоступен'); return; }
+  let aoResult=null, aoVoice='';
+  if(d._ao){
+    const list=d._ao.translations?.[String(episode)]||[], preferred=opts.voice||d._aoSelectedVoice||S.extra?.watchPrefs?.[d.id]?.voice||'';
+    if(preferred&&!list.includes(preferred)){toast('Озвучка «'+preferred+'» недоступна для этой серии. Выберите другую.');return;}
+    aoVoice=list.includes(preferred)?preferred:(list.find(v=>v!=='jap')||list[0]||'');
+    if(!aoVoice){toast('Для этой серии нет доступной озвучки');return;}
+    const status=animeOnStatus();
+    if(!status.connected){toast('Войдите в AnimeOn для просмотра');animeOnDialog();return;}
+    const request=++aoMobilePlaySequence, playerToken=NP.token, origin=opts.origin;
+    toast('Подключаем AnimeOn…');
+    aoResult=await aoMobileResolve({animeId:d._ao.animeId,episode:Number(episode),translation:aoVoice});
+    if(request!==aoMobilePlaySequence||NP.token!==playerToken||(origin&&!alivePg(origin)))return;
+    if(!aoResult.url){toast(aoResult.error==='AUTH_REQUIRED'?'Войдите в AnimeOn заново':'Не удалось открыть серию AnimeOn');return;}
+    d._aoSelectedVoice=aoVoice;
+    const prefs=((S.extra ||= {}).watchPrefs ||= {}), old=prefs[d.id]||{};
+    if(old.voice!==aoVoice){prefs[d.id]={...old,mode:old.mode||'auto',voice:aoVoice,ts:Math.max(Date.now(),Number(old.ts||0)+1)};save();}
+  }
   const key = progKey(d.id, season, episode);
   const resume = opts.fromStart ? null : resumeInfo(d.id, season, episode);
   const token = ++NP.token;
-  Object.assign(NP, { on: true, d, seasons, season, episode, key, tr: null, secs: [], menu: '', st: { p: 0, d: 0, pl: false, b: true, w: true }, lastSave: 0, subApplied: '', scrub: null, skipSec: null });
+  Object.assign(NP, { on: true, completed: false, d, seasons, season, episode, key, tr: null, sourceVideo:false, secs: [], menu: '', st: { p: 0, d: 0, pl: false, b: true, w: true }, lastSave: 0, subApplied: '', scrub: null, skipSec: null, aoAudioIndex:aoResult?Number(aoResult.audioIndex)||0:null, audioNames:[] });
   addHistory(d, season, episode);
   npDom(); NP.live = null; clearInterval(TVD.timers.count); clearInterval(TVD.timers.head);
   const el = $('#np'); el.classList.remove('live'); el.classList.remove('hidden'); document.body.classList.add('np'); document.documentElement.classList.add('np');
@@ -58,6 +79,7 @@ async function playItem(d, seasons, season, episode, opts = {}) {
   $('#npPrev').classList.toggle('hidden', !season); $('#npNext').classList.toggle('hidden', !season);
   $('.np-chips [data-m=eps]').classList.toggle('hidden', !season);
   closeMenu(); npUi(5000);
+  if(aoResult){NP.secs=(aoResult.skips||[]).filter(x=>['op','ed'].includes(x.type)&&Number.isFinite(x.start)&&Number.isFinite(x.end)&&x.start>=0&&x.end>x.start&&x.end-x.start<=300);NATIVE.npStart(JSON.stringify({url:aoResult.url,ua:NP_UA,referer:'https://animeon.cc/',startMs:resume?Math.floor(resume.t*1000):0,subs:[]}));return;}
   let data;
   try { data = await npEmbed(d); } catch { if (token === NP.token) npFail('Не удалось получить поток'); return; }
   if (token !== NP.token) return;
@@ -76,7 +98,7 @@ async function playItem(d, seasons, season, episode, opts = {}) {
 }
 function npFail(msg) {
   const d = NP.d;
-  if (NP.live || !d || !d.iframe_uri) { toast(msg); npClose(true); return; }
+  if (NP.live || NP.sourceVideo || !d || !d.iframe_uri) { toast(msg); npClose(true); return; }
   toast(msg + ' — открываем плеер сайта'); npClose(true); openEmbed(d, NP.season, NP.episode);
 }
 /** Запасной вариант: родной плеер сайта в рамке на весь экран (ландшафт), если поток не удалось получить. */
@@ -88,15 +110,16 @@ function openEmbed(d, season, episode) {
   pg._onClose = () => { try { NATIVE.playerMode(false); } catch {} };
   try { NATIVE.playerMode(true); } catch {}
 }
-function npClose(silent) {
+function npClose(silent, finished = false) {
   if (!NP.on) return;
-  try { if (NP.st.d > 120000) storeProgress(NP.key, NP.st.p / 1000, NP.st.d / 1000); } catch {}
-  NP.on = false; NP.token++; clearTimeout(NP.uiT); tvClean();
+  try { if (!finished && !NP.completed && NP.st.d > 120000) storeProgress(NP.key, NP.st.p / 1000, NP.st.d / 1000); } catch {}
+  NP.resetGesture?.(); NP.on = false; NP.token++; aoMobilePlaySequence++; clearTimeout(NP.uiT); tvClean();
   try { if (window.syncAfterPlay) syncAfterPlay(); } catch {}
   try { NATIVE.npStop(); NATIVE.playerMode(false); } catch {}
   document.body.classList.remove('np'); document.documentElement.classList.remove('np');
   $('#np').classList.add('hidden'); closeMenu();
-  if (!silent) refreshAfterPlay(); else if (typeof refreshAfterPlay === 'function') refreshAfterPlay();
+  if (typeof refreshAfterPlay === 'function') refreshAfterPlay();
+  else if (typeof PG !== 'undefined') PG.at(-1)?._refreshAo?.();
 }
 window.npBack = () => { if (!NP.on) return false; if (NP.menu) { closeMenu(); return true; } npClose(); return true; };
 window.npPauseIfPlaying = () => { if (NP.on && NP.st.w) NATIVE.npCmd('pause', 0); };
@@ -106,21 +129,22 @@ window.npState = (s) => {
   if (!NP.on) return;
   NP.st = s;
   const p = s.p / 1000, d = s.d / 1000;
+  if (NP.completed && s.pl && d > 0 && p < d - 45) NP.completed = false;
   if (d && !NP.scrub) paintSeek(p, d);
   $('#np .np-load').classList.toggle('hidden', !(s.b && s.p < 1500));
   $('#np .np-buf').classList.toggle('hidden', !(s.b && s.p >= 1500));
-  const pb = $('#npToggle'); const html = s.w ? NPI.pause : NPI.play; if (pb.dataset.i !== (s.w ? 'p' : 'q')) { pb.innerHTML = html; pb.dataset.i = s.w ? 'p' : 'q'; }
+  const pb = $('#npToggle'); pb.setAttribute('aria-label', s.w ? 'Пауза' : 'Воспроизвести'); const html = s.w ? NPI.pause : NPI.play; if (pb.dataset.i !== (s.w ? 'p' : 'q')) { pb.innerHTML = html; pb.dataset.i = s.w ? 'p' : 'q'; }
   npSkipCheck(p);
-  if (Date.now() - NP.lastSave > 5000 && d > 120 && s.p > 3000) { NP.lastSave = Date.now(); storeProgress(NP.key, p, d); }
+  if (!NP.completed && Date.now() - NP.lastSave > 5000 && d > 120 && s.p > 3000) { NP.lastSave = Date.now(); storeProgress(NP.key, p, d); }
 };
 window.npEvent = (ev, msg) => {
   if (!NP.on) return;
   if (NP.live) { tvEvent(ev, msg); return; }
-  if (ev === 'ready') { $('#np .np-load').classList.add('hidden'); npApplyPrefs(); }
-  else if (ev === 'ended') { storeProgress(NP.key, 1e9, 1e9); if (!npNext(1)) npClose(); }
+  if (ev === 'ready') { $('#np .np-load').classList.add('hidden'); npApplyAoAudio(); npApplyPrefs(); }
+  else if (ev === 'ended') { NP.completed = true; storeProgress(NP.key, 1e9, 1e9); if (!npNext(1, true)) npClose(false, true); }
   else if (ev === 'fallback') toast('Видео 1080p не запустилось, включаем обычный поток');
   else if (ev === 'error') npFail('Ошибка воспроизведения' + (msg ? ' (' + msg + ')' : ''));
-  else if (ev === 'tracks') { if (NP.menu) renderMenu(); npPaintChips(); }
+  else if (ev === 'tracks') { npApplyAoAudio(); if (NP.menu) renderMenu(); npPaintChips(); }
 };
 function paintSeek(p, d) {
   const r = Math.min(1, p / d) * 100;
@@ -144,15 +168,17 @@ function npDoSkip() {
 }
 
 /* ---------- серии ---------- */
-const npList = () => { const out = []; for (const s of NP.seasons) for (const e of s.episodes) out.push([s.season, e]); return out; };
+const npList = () => { const out = [], seen = new Set(); for (const s of NP.seasons) for (const e of s.episodes) { const key = JSON.stringify([String(s.season), String(e)]); if (seen.has(key)) continue; seen.add(key); out.push([s.season, e]); } return out; };
 function npHasNext() { if (!NP.season) return false; const l = npList(); const i = l.findIndex(([s, e]) => String(s) === String(NP.season) && String(e) === String(NP.episode)); return i >= 0 && i < l.length - 1; }
-function npNext(dir) {
+function npNext(dir, finished = false) {
   if (!NP.season) return false;
   const l = npList(); const i = l.findIndex(([s, e]) => String(s) === String(NP.season) && String(e) === String(NP.episode));
+  if (i < 0) return false;
   const n = l[i + dir]; if (!n) return false;
-  try { if (NP.st.d > 120000) storeProgress(NP.key, NP.st.p / 1000, NP.st.d / 1000); } catch {}
-  playItem(NP.d, NP.seasons, n[0], n[1]); return true;
+  try { if (!finished && !NP.completed && NP.st.d > 120000) storeProgress(NP.key, NP.st.p / 1000, NP.st.d / 1000); } catch {}
+  npPlayEpisode(n[0],n[1]); return true;
 }
+function npPlayEpisode(season,episode){const item=NP.d,list=item?._ao?.translations?.[String(episode)]||[],preferred=item?._aoSelectedVoice||S.extra?.watchPrefs?.[item?.id]?.voice;if(item?._ao&&preferred&&!list.includes(preferred)){NP.aoPendingEpisode={season,episode};openMenu('aochoose');return;}playItem(item,NP.seasons,season,episode);}
 
 /* ---------- запомненные озвучка и субтитры ---------- */
 function npAudioName(a) {
@@ -164,10 +190,11 @@ function npAudioName(a) {
 function npApplyPrefs() {
   let tr; try { tr = JSON.parse(NATIVE.npTracks()); } catch { return; }
   const pf = npPrefs();
-  if (pf.audio) { const a = (tr.audio || []).find((x) => npAudioName(x) === pf.audio && !x.sel); if (a) NATIVE.npSelect('audio', a.g, a.t); }
+  if (pf.audio && !NP.d?._ao) { const a = (tr.audio || []).find((x) => npAudioName(x) === pf.audio && !x.sel); if (a) NATIVE.npSelect('audio', a.g, a.t); }
   if (pf.sub && NP.subApplied !== NP.key) { const t = (tr.text || []).find((x) => x.name === pf.sub); if (t) NATIVE.npSelect('text', t.g, t.t); }
   NP.subApplied = NP.key; npPaintChips();
 }
+function npApplyAoAudio(){if(NP.aoAudioIndex==null)return;let tr;try{tr=JSON.parse(NATIVE.npTracks());}catch{return;}const audio=(tr.audio||[]).slice().sort((a,b)=>a.i-b.i),track=audio[NP.aoAudioIndex];if(!track)return;NP.aoAudioIndex=null;if(!track.sel)NATIVE.npSelect('audio',track.g,track.t);}
 /* значения на кнопках: что сейчас выбрано */
 function npPaintChips() {
   let tr = {}; try { tr = JSON.parse(NATIVE.npTracks()); } catch { return; }
@@ -201,7 +228,9 @@ function npUiHide() { clearTimeout(NP.uiT); $('#np').classList.remove('ui'); NP.
 /* ---------- жесты ---------- */
 function bindTouch() {
   const t = $('#npTouch');
-  let g = null, lastTap = 0, tapT = 0;
+  let g = null, lastTap = 0, lastTapRegion = -1, tapT = 0;
+  NP.resetGesture = () => { g = null; clearTimeout(tapT); lastTap = 0; lastTapRegion = -1; NP.resetSeek?.(); if (NP.scrub) { NP.scrub = null; hideThumb(); const duration = NP.st.d / 1000; if (duration > 0) paintSeek(NP.st.p / 1000, duration); } };
+  document.addEventListener('pointerdown', (e) => { if (NP.on && e.isPrimary === false) NP.resetGesture(); }, true);
   const hint = (kind, v) => {
     const h = $('#np .np-hint'); h.classList.remove('hidden');
     h.innerHTML = `${kind === 'b' ? NPI.sun : NPI.vol}<div><i style="width:${Math.round(v * 100)}%"></i></div>`;
@@ -209,16 +238,18 @@ function bindTouch() {
   };
   const feedback = (side, text) => { const f = $('#np .np-fb.' + side); f.innerHTML = (side === 'l' ? NPI.rew : NPI.fwd) + `<span>${text}</span>`; f.classList.remove('go'); void f.offsetWidth; f.classList.add('go'); };
   t.addEventListener('pointerdown', (e) => {
+    if (g || e.isPrimary === false) { NP.resetGesture(); return; }
     if (NP.menu) { closeMenu(); return; }
     try { t.setPointerCapture(e.pointerId); } catch {}
-    g = { x: e.clientX, y: e.clientY, t0: Date.now(), mode: '', p0: NP.st.p / 1000, b0: -1, v0: -1, left: e.clientX < innerWidth / 2 };
+    g = { id: e.pointerId, x: e.clientX, y: e.clientY, t0: Date.now(), mode: '', p0: NP.st.p / 1000, b0: -1, v0: -1, left: e.clientX < innerWidth / 2 };
   });
   t.addEventListener('pointermove', (e) => {
-    if (!g) return;
+    if (!g || (e.pointerId != null && e.pointerId !== g.id)) return;
     const dx = e.clientX - g.x, dy = e.clientY - g.y;
     if (!g.mode) {
       if (Math.abs(dx) < 14 && Math.abs(dy) < 14) return;
-      g.mode = Math.abs(dx) > Math.abs(dy) ? 'seek' : (g.left ? 'bright' : 'vol');
+      clearTimeout(tapT); lastTap = 0; lastTapRegion = -1;
+      g.mode = Math.abs(dx) > Math.abs(dy) ? (NP.live ? 'ignore' : 'seek') : (g.left ? 'bright' : 'vol');
       if (g.mode === 'bright') g.b0 = NATIVE.getBrightness(); if (g.mode === 'vol') g.v0 = NATIVE.getVolume();
       if (g.mode === 'seek') { NP.scrub = { t: g.p0 }; npUi(0); }
     }
@@ -230,33 +261,36 @@ function bindTouch() {
     else if (g.mode === 'vol') { const v = Math.max(0, Math.min(1, g.v0 - dy / (innerHeight * 0.8))); NATIVE.volume(v); hint('v', v); }
   });
   const end = (e) => {
-    if (!g) return; const cur = g; g = null;
+    if (!g || (e.pointerId != null && e.pointerId !== g.id)) return; const cur = g; g = null;
     if (cur.mode === 'seek' && NP.scrub) { const tt = NP.scrub.t; NP.scrub = null; hideThumb(); NATIVE.npCmd('seekTo', Math.floor(tt * 1000)); npUi(2500); return; }
     if (cur.mode) return;
     if (Date.now() - cur.t0 > 350) return;
-    const now = Date.now(), x = e.clientX / innerWidth;
-    if (now - lastTap < 320) {
+    const now = Date.now(), x = e.clientX / innerWidth, region = x < 0.33 ? 0 : x > 0.67 ? 2 : 1;
+    if (now - lastTap < 320 && region === lastTapRegion) {
       clearTimeout(tapT); lastTap = 0;
-      if (x < 0.33) { NATIVE.npCmd('seekBy', -10000); feedback('l', '−10 с'); }
-      else if (x > 0.67) { NATIVE.npCmd('seekBy', 10000); feedback('r', '+10 с'); }
+      if (x < 0.33) { if (!NP.live) { NATIVE.npCmd('seekBy', -10000); feedback('l', '−10 с'); } }
+      else if (x > 0.67) { if (!NP.live) { NATIVE.npCmd('seekBy', 10000); feedback('r', '+10 с'); } }
       else { NATIVE.npCmd('toggle', 0); npUi(3500); }
       return;
     }
-    lastTap = now;
+    if (now - lastTap < 320) clearTimeout(tapT);
+    lastTap = now; lastTapRegion = region;
     tapT = setTimeout(() => { if (NP.ui) npUiHide(); else npUi(3500); }, 320);
   };
   t.addEventListener('pointerup', end);
-  t.addEventListener('pointercancel', () => { g = null; if (NP.scrub) { NP.scrub = null; hideThumb(); } });
+  t.addEventListener('pointercancel', () => NP.resetGesture());
 }
 /* полоса перемотки */
 function bindSeek() {
   const sk = $('#npSeek');
-  let on = false;
+  let on = false, pointer = null;
   const ratio = (e) => { const r = $('.rail', sk).getBoundingClientRect(); return Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)); };
-  sk.addEventListener('pointerdown', (e) => { const dur = NP.st.d / 1000; if (!dur) return; on = true; sk.setPointerCapture(e.pointerId); NP.scrub = { t: ratio(e) * dur }; npUi(0); paintSeek(NP.scrub.t, dur); showThumb(NP.scrub.t, ratio(e)); });
-  sk.addEventListener('pointermove', (e) => { if (!on) return; const dur = NP.st.d / 1000, r = ratio(e); NP.scrub.t = r * dur; paintSeek(NP.scrub.t, dur); showThumb(NP.scrub.t, r); });
-  const end = () => { if (!on) return; on = false; const tt = NP.scrub && NP.scrub.t; NP.scrub = null; hideThumb(); if (tt != null) NATIVE.npCmd('seekTo', Math.floor(tt * 1000)); npUi(2500); };
-  sk.addEventListener('pointerup', end); sk.addEventListener('pointercancel', end);
+  const cancel = () => { if (!on) return; on = false; pointer = null; NP.scrub = null; hideThumb(); const duration = NP.st.d / 1000; if (duration > 0) paintSeek(NP.st.p / 1000, duration); npUi(2500); };
+  NP.resetSeek = cancel;
+  sk.addEventListener('pointerdown', (e) => { if (on || e.isPrimary === false) { if (e.isPrimary === false && NP.resetGesture) NP.resetGesture(); else cancel(); return; } const dur = NP.st.d / 1000; if (!dur) return; on = true; pointer = e.pointerId; sk.setPointerCapture(e.pointerId); NP.scrub = { t: ratio(e) * dur }; npUi(0); paintSeek(NP.scrub.t, dur); showThumb(NP.scrub.t, ratio(e)); });
+  sk.addEventListener('pointermove', (e) => { if (!on || (e.pointerId != null && e.pointerId !== pointer)) return; const dur = NP.st.d / 1000, r = ratio(e); NP.scrub.t = r * dur; paintSeek(NP.scrub.t, dur); showThumb(NP.scrub.t, r); });
+  const end = (e) => { if (!on || (e?.pointerId != null && e.pointerId !== pointer)) return; on = false; pointer = null; const tt = NP.scrub && NP.scrub.t; NP.scrub = null; hideThumb(); if (tt != null) NATIVE.npCmd('seekTo', Math.floor(tt * 1000)); npUi(2500); };
+  sk.addEventListener('pointerup', end); sk.addEventListener('pointercancel', cancel);
 }
 function showThumb(t, r) {
   const box = $('#np .np-thumb'), P = NP.prev;
@@ -286,10 +320,11 @@ function renderMenu() {
   let tr = {}; try { tr = JSON.parse(NATIVE.npTracks()); } catch {}
   const row = (label, sel, attrs, sub) => `<button class="mr ${sel ? 'on' : ''}" ${attrs}><i>${sel ? NPI.check : ''}</i><span>${esc(label)}</span>${sub ? `<small>${esc(sub)}</small>` : ''}</button>`;
   let html = '', title = '';
-  if (NP.menu === 'audio') {
-    title = 'Звук';
-    const list = (tr.audio || []).slice().sort((a, b) => a.i - b.i);
-    html = list.length ? list.map((a) => row(npAudioName(a), a.sel, `data-nsel="audio" data-g="${a.g}" data-t="${a.t}" data-pref="${esc(npAudioName(a))}"`, a.ch > 2 ? '5.1' : '')).join('') : '<div class="me">Дорожек нет</div>';
+  if(NP.menu==='aochoose'){
+    const pending=NP.aoPendingEpisode,list=NP.d?._ao?.translations?.[String(pending?.episode)]||[];title='Озвучка · серия '+(pending?.episode||'');html='<div class="me">Предыдущая озвучка недоступна. Выберите другую.</div>'+(list.length?list.map((v,i)=>row(v,false,`data-ao-next-voice="${i}"`)).join(''):'<div class="me">Для этой серии нет доступных озвучек</div>');
+  } else if (NP.menu === 'audio') {
+    if(NP.d?._ao){title='Озвучка';const list=NP.d._ao.translations?.[String(NP.episode)]||[];html=list.length?list.map((v,i)=>row(v,v===NP.d._aoSelectedVoice,`data-ao-audio="${i}"`)).join(''):'<div class="me">Озвучек нет</div>';}
+    else {title = 'Звук';const list = (tr.audio || []).slice().sort((a, b) => a.i - b.i);html = list.length ? list.map((a) => row(npAudioName(a), a.sel, `data-nsel="audio" data-g="${a.g}" data-t="${a.t}" data-pref="${esc(npAudioName(a))}"`, a.ch > 2 ? '5.1' : '')).join('') : '<div class="me">Дорожек нет</div>';}
   } else if (NP.menu === 'subs') {
     title = 'Субтитры';
     const list = tr.text || [];
@@ -312,6 +347,8 @@ function renderMenu() {
 }
 function onMenuClick(e) {
   const el = e.target.closest('button'); if (!el) return;
+  if(el.dataset.aoNextVoice!==undefined && NP.aoPendingEpisode){const pending=NP.aoPendingEpisode,voice=(NP.d?._ao?.translations?.[String(pending.episode)]||[])[Number(el.dataset.aoNextVoice)];if(voice){NP.aoPendingEpisode=null;closeMenu();playItem(NP.d,NP.seasons,pending.season,pending.episode,{voice});}return;}
+  if(el.dataset.aoAudio!==undefined && NP.d?._ao){const voice=(NP.d._ao.translations?.[String(NP.episode)]||[])[Number(el.dataset.aoAudio)];if(voice&&voice!==NP.d._aoSelectedVoice){try{if(!NP.completed&&NP.st.d>120000)storeProgress(NP.key,NP.st.p/1000,NP.st.d/1000);}catch{}closeMenu();playItem(NP.d,NP.seasons,NP.season,NP.episode,{voice});}else closeMenu();return;}
   if (el.dataset.tvplay) { const c = tvChan(el.dataset.tvplay); closeMenu(); if (c) tvPlay(c); return; }
   if (el.dataset.nsize) { npPrefs().subSize = el.dataset.nsize; save(); npApplySubSize(); renderMenu(); return; }
   if (el.dataset.nsel) {
@@ -322,14 +359,14 @@ function onMenuClick(e) {
   }
   if (el.dataset.nspeed) { NATIVE.npCmd('speed', +el.dataset.nspeed); setTimeout(() => { closeMenu(); npPaintChips(); }, 150); return; }
   if (el.dataset.nseason) { NP.npSeason = el.dataset.nseason; renderMenu(); return; }
-  if (el.dataset.nep) { const sn = el.dataset.nsn, ep = el.dataset.nep; NP.npSeason = null; closeMenu(); try { if (NP.st.d > 120000) storeProgress(NP.key, NP.st.p / 1000, NP.st.d / 1000); } catch {} playItem(NP.d, NP.seasons, sn, ep); }
+  if (el.dataset.nep) { const sn = el.dataset.nsn, ep = el.dataset.nep; NP.npSeason = null; closeMenu(); try { if (!NP.completed && NP.st.d > 120000) storeProgress(NP.key, NP.st.p / 1000, NP.st.d / 1000); } catch {} npPlayEpisode(sn,ep); }
 }
 
 /* ---------- трейлер с Rutube: тот же нативный плеер, без серий ---------- */
 async function playTrailer(t) {
   if (!NATIVE || !NATIVE.npStart) { toast('Плеер недоступен'); return; }
   const token = ++NP.token;
-  Object.assign(NP, { on: true, d: { id: -1, name: t.title }, seasons: [], season: null, episode: null, key: '', tr: null, secs: [], menu: '', st: { p: 0, d: 0, pl: false, b: true, w: true }, lastSave: 0, subApplied: '1', audioNames: [], scrub: null, skipSec: null });
+  Object.assign(NP, { on: true, completed: false, d: { id: -1, name: t.title }, seasons: [], season: null, episode: null, key: '', tr: null, sourceVideo:false, secs: [], menu: '', st: { p: 0, d: 0, pl: false, b: true, w: true }, lastSave: 0, subApplied: '1', audioNames: [], scrub: null, skipSec: null });
   npDom(); tvClean(); $('#np').classList.remove('live');
   $('#np').classList.remove('hidden'); document.body.classList.add('np'); document.documentElement.classList.add('np');
   npApplySubSize(); npSubLast = null; window.npCue('');

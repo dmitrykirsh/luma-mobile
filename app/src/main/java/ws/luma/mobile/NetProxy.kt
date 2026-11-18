@@ -203,7 +203,7 @@ class NetProxy(ctx: Context) {
                 val bytes = r.body!!.bytes()
                 val head = String(bytes, 0, minOf(64, bytes.size), Charsets.UTF_8)
                 if (Regex("^[\\s\\uFEFF]*#EXTM3U").containsMatchIn(head)) {
-                    val txt = rewriteM3u8(String(bytes, Charsets.UTF_8).trimStart('﻿', ' ', '\n', '\r', '\t'), finalUrl, ua, ref)
+                    val txt = rewriteM3u8(String(bytes, Charsets.UTF_8).trimStart('\uFEFF', ' ', '\n', '\r', '\t'), finalUrl, ua, ref)
                     return WebResourceResponse("application/vnd.apple.mpegurl", "utf-8", 200, "OK", hdr, ByteArrayInputStream(txt.toByteArray(Charsets.UTF_8)))
                 }
                 return WebResourceResponse(ct.substringBefore(';').ifEmpty { "application/octet-stream" }, "utf-8", r.code, r.message.ifEmpty { "OK" }, hdr, ByteArrayInputStream(bytes))

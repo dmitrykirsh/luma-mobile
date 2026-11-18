@@ -17,6 +17,8 @@ const lsPut = (k, v) => { lsCache.set(k, { t: Date.now(), v }); return v; };
 const lsSecret = (n) => (S.secrets && S.secrets[n]) || '';
 const savedLists = () => (tvX().lists = tvX().lists || []);
 const isListSaved = (url) => savedLists().some((l) => l.url === url);
+const listSavedAt = url => Math.max(Date.now(),Number(S.gone?.['l:'+url]||0)+1);
+function markListRemoved(url){const at=Number(savedLists().find(x=>x.url===url)?.at||0);S.gone||={};S.gone['l:'+url]=Math.max(Date.now(),at+1,Number(S.gone['l:'+url]||0)+1);}
 
 /* ---------- перевод запроса на английский ---------- */
 const CYR = /[А-Яа-яЁё]/;
@@ -36,16 +38,16 @@ async function toEnglish(q) {
   if (trCache.has(key)) return trCache.get(key);
   let out = q;
   try {
-    const r = await fetch(tvPx('https://api.mymemory.translated.net/get?langpair=ru|en&q=' + encodeURIComponent(q), '', '', true)); const j = await r.json();
+    const r = await fetch(tvPx('https://api.mymemory.translated.net/get?langpair=ru|en&q=' + encodeURIComponent(q), '', '', true), { signal: AbortSignal.timeout(8000) }); const j = await r.json();
     const t = String((j.responseData && j.responseData.translatedText) || '').trim();
     if (t && !CYR.test(t) && !/MYMEMORY WARNING|QUERY LENGTH LIMIT/i.test(t)) out = t.replace(/[.!?]+$/, '').toLowerCase();
   } catch {}
-  trCache.set(key, out); return out;
+  if (out !== q) trCache.set(key, out); return out;
 }
 
 /* ---------- Letterboxd ---------- */
 async function lbFetch(url) {
-  const r = await fetch(tvPx(url, LS_UA, '', true, { 'Accept-Language': 'en-US,en;q=0.9' }));
+  const r = await fetch(tvPx(url, LS_UA, '', true, { 'Accept-Language': 'en-US,en;q=0.9' }), { signal: AbortSignal.timeout(12000) });
   const text = await r.text();
   if (r.status === 403 || /Just a moment/i.test(text.slice(0, 3000))) throw lsErr('BLOCKED');
   if (r.status === 404) throw lsErr('NOT_FOUND');
@@ -62,11 +64,12 @@ async function lbList(url, quick) {
   const all = lbFilms(h);
   const about = desc.replace(/^A list of [\d,]+ films? compiled on Letterboxd, including .*? About this list:\s*/i, '').replace(/^A list of [\d,]+ films? compiled on Letterboxd.*$/i, '');
   const pages = quick ? 1 : Math.min(10, Math.ceil((count || all.length) / 100));
-  const rest = Array.from({ length: Math.max(0, pages - 1) }, (_, i) => i + 2), got = {}; let idx = 0;
-  await Promise.all(Array.from({ length: 3 }, async () => { while (idx < rest.length) { const p = rest[idx++]; try { got[p] = lbFilms(await lbFetch(url + 'page/' + p + '/')); } catch { got[p] = []; } } }));
+  const rest = Array.from({ length: Math.max(0, pages - 1) }, (_, i) => i + 2), got = {}, failedPages = []; let idx = 0;
+  await Promise.all(Array.from({ length: 3 }, async () => { while (idx < rest.length) { const p = rest[idx++]; try { got[p] = lbFilms(await lbFetch(url + 'page/' + p + '/')); } catch { got[p] = []; failedPages.push(p); } } }));
   for (const p of rest) all.push(...(got[p] || []));
   const m = url.match(LIST_RE);
-  return lsPut(ck, { url, source: 'letterboxd', title: meta('og:title') || m[2], author: m[1], desc: about.slice(0, 400), count: count || all.length, films: all.slice(0, count || 1000), names: all.slice(0, 3).map((f) => f.title) });
+  const result = { url, source: 'letterboxd', title: meta('og:title') || m[2], author: m[1], desc: about.slice(0, 400), count: count || all.length, films: all.slice(0, count || 1000), names: all.slice(0, 3).map((f) => f.title), failedPages };
+  return failedPages.length ? result : lsPut(ck, result);
 }
 async function lbPopular() {
   const hit = lsGet('lb:pop', 1800e3); if (hit) return hit;
@@ -84,7 +87,7 @@ async function lbPopular() {
 async function mdb(p, params = {}) {
   const key = lsSecret('mdblist'); if (!key) throw lsErr('NO_KEY');
   const u = new URL('https://api.mdblist.com' + p); for (const [k, v] of Object.entries(params)) u.searchParams.set(k, v); u.searchParams.set('apikey', key);
-  const r = await fetch(tvPx(u.toString(), LS_UA_APP, '', true));
+  const r = await fetch(tvPx(u.toString(), LS_UA_APP, '', true), { signal: AbortSignal.timeout(12000) });
   if (r.status === 401 || r.status === 403) throw lsErr('BAD_KEY'); if (r.status === 429) throw lsErr('RATE'); if (r.status === 404) throw lsErr('NOT_FOUND'); if (!r.ok) throw lsErr('HTTP');
   return r.json();
 }
@@ -104,7 +107,7 @@ async function mdList(id) {
 async function trakt(p, params = {}) {
   const key = lsSecret('trakt'); if (!key) throw lsErr('NO_KEY');
   const u = new URL('https://api.trakt.tv' + p); for (const [k, v] of Object.entries(params)) u.searchParams.set(k, v);
-  const r = await fetch(tvPx(u.toString(), LS_UA_APP, '', true, { 'trakt-api-version': '2', 'trakt-api-key': key, 'Content-Type': 'application/json' }));
+  const r = await fetch(tvPx(u.toString(), LS_UA_APP, '', true, { 'trakt-api-version': '2', 'trakt-api-key': key, 'Content-Type': 'application/json' }), { signal: AbortSignal.timeout(12000) });
   if (r.status === 401 || r.status === 403) throw lsErr('BAD_KEY'); if (r.status === 429) throw lsErr('RATE'); if (r.status === 404) throw lsErr('NOT_FOUND'); if (!r.ok) throw lsErr('HTTP');
   return { json: await r.json(), pages: Number(r.headers.get('x-pagination-page-count') || 1) };
 }

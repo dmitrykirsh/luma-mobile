@@ -29,6 +29,7 @@ import org.json.JSONObject
  * Нативный плеер (Media3/ExoPlayer) под прозрачным WebView: видео рисуется системой, а кнопки, список серий и меню
  * (звук, субтитры, качество, скорость) рисует веб-интерфейс. Управляется через мост: start/cmd/tracks/stop.
  */
+@androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
 class NativePlayer(private val activity: Activity, private val root: FrameLayout, private val js: (String) -> Unit) {
     private var player: ExoPlayer? = null
     private val handler = Handler(Looper.getMainLooper())
