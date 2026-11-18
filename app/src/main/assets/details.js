@@ -48,6 +48,7 @@ async function openDetails(id, opts = {}, existingPg = null) {
   const pre = await Promise.race([detailsPrefetch(d).catch(() => null), wait(4500)]);
   if (!alivePg(pg)) return;
   const inf = d.info || {}, seasons = seasonsOf(d), serial = seasons.length > 0;
+  if (!inf.description && pre?.T?.overview) inf.description = pre.T.overview;
   const people = d.people || {};
   const X = { d, inf, seasons, serial, cur: null, tab: '', T: null, trailers: null, shots: [], recsP: null, pg };
   const lastEp = () => { const h = S.history.find((x) => String(x.id) === String(d.id)); return h && h.season ? h : null; };
@@ -170,6 +171,7 @@ async function detailsEnhance(X) {
   if (!T) { X.recsP = Promise.resolve(null); return; }
   const had = X.pre;
   X.T = T; X.shots = T.shots || [];
+  if (!X.inf.description && T.overview) { X.inf.description = T.overview; if (X.tab === 'about') { X.tab = ''; selectTab(X, 'about'); } }
   if (!had && T.backdrop) { const im = new Image(); im.onload = () => { if (alivePg(pg)) X.paintHead(); }; im.src = TMI(T.backdrop, 'w1280'); }
   if (!had && T.logo) { const img = new Image(); img.className = 'logo-img'; img.alt = d.name; img.onload = () => { X.logoImg = img; if (alivePg(pg)) { const t = $('#dTitle', pg); if (t) { t.textContent = ''; t.appendChild(img.cloneNode()); t.classList.add('has-logo'); } } }; img.src = TMI(T.logo, 'w500'); }
   if (X.shots.length > 1 && !$('[data-dtab=shots]', pg)) { $('[data-dtab=more]', pg)?.insertAdjacentHTML('beforebegin', '<button class="chip" data-dtab="shots">Кадры</button>'); X.tabs.splice(X.tabs.length - 1, 0, ['shots', 'Кадры']); }

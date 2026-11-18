@@ -144,11 +144,12 @@ async function openAoMobileCollection(slug, existingPg = null) {
     pg.onclick = e => {const b=e.target.closest('[data-ao-slug]');if(b)openAoMobileDetails(b.dataset.aoSlug);};
   } catch { if (alivePg(pg)) { pg.innerHTML=backBtn()+'<div class="empty" style="padding-top:35vh"><h3>Не удалось открыть подборку</h3><p>Проверьте подключение и попробуйте ещё раз.</p><button class="btn" data-ao-collection-retry>Повторить</button></div>'; pg.querySelector('[data-ao-collection-retry]').onclick=()=>openAoMobileCollection(slug,pg); } }
 }
-const aoMobileMatchName=x=>String(x||'').replace(/\[[^\]]*\]/g,' ').normalize('NFKC').toLocaleLowerCase('ru-RU').replace(/ё/g,'е').replace(/[^a-zа-я0-9]+/g,' ').trim();
+const aoMobileMatchName=x=>String(x||'').replace(/\[[^\]]*\]/g,' ').normalize('NFKC').toLocaleLowerCase('ru-RU').replace(/ё/g,'е').replace(/(\p{L})(\d)/gu,'$1 $2').replace(/[^\p{L}\p{N}]+/gu,' ').trim();
+const aoMobileBaseTitle=x=>String(x||'').replace(/\s*\[(?:ТВ|TV)[-\s]*\d+[^\]]*\]/gi,'').replace(/(\((?:19|20)\d{2}\))\s+\d+\s*$/,'$1').replace(/\s+(?:(?:season|сезон)\s*\d+(?:\s*(?:part|часть)\s*\d+)?|\d+(?:st|nd|rd|th)\s+season)\s*$/i,'').replace(/\s*\((?:19|20)\d{2}\)\s*$/g,'').trim();
 async function aoMobileTmdbMatch(item,stillActive=()=>true){
-  const kind=Number(item.type)===6?'movie':'tv',year=Number(item.year)||0,names=[...new Set([item.name,item.origin_name].map(aoMobileMatchName).filter(Boolean))],queries=[...new Set([String(item.name||'').replace(/\[[^\]]*\]/g,' ').trim(),item.origin_name].filter(Boolean))],candidates=new Map();
-  for(const q of queries){if(!stillActive())return null;const params={query:q};if(year)params[kind==='tv'?'first_air_date_year':'year']=year;const j=await tmdb('/search/'+kind,params);for(const x of j.results||[]){const actual=[x.name,x.title,x.original_name,x.original_title].map(aoMobileMatchName).filter(Boolean),y=Number(String(x.first_air_date||x.release_date||'').slice(0,4))||0;if(names.some(n=>actual.includes(n))&&(!year||y===year))candidates.set(String(x.id),x);}}
-  const ranked=[...candidates.values()];return ranked.length===1?{kind,id:ranked[0].id}:null;
+  const kind=Number(item.type)===6?'movie':'tv',year=Number(item.year)||0,queries=[...new Set([item.name,item.origin_name,...(Array.isArray(item._aoAliases)?item._aoAliases:[])].map(aoMobileBaseTitle).filter(Boolean))],names=queries.map(aoMobileMatchName),candidates=new Map();
+  for(const q of queries){if(!stillActive())return null;const params={query:q};if(year)params[kind==='tv'?'first_air_date_year':'year']=year;let j=await tmdb('/search/'+kind,params);if(kind==='tv'&&year){delete params.first_air_date_year;const more=await tmdb('/search/'+kind,params);j={results:[...(j.results||[]),...(more.results||[])]};}for(const x of j.results||[]){if(Array.isArray(x.genre_ids)&&!x.genre_ids.includes(16))continue;const actual=[x.name,x.title,x.original_name,x.original_title].map(aoMobileMatchName).filter(Boolean),y=Number(String(x.first_air_date||x.release_date||'').slice(0,4))||0;if(names.some(n=>actual.includes(n))&&(!year||kind==='tv'||y===year))candidates.set(String(x.id),{x,y});}}
+  const ranked=[...candidates.values()].sort((a,b)=>Math.abs((a.y||0)-year)-Math.abs((b.y||0)-year));if(!ranked.length)return null;if(ranked.length>1&&(!year||!ranked[0].y||Math.abs(ranked[0].y-year)===Math.abs(ranked[1].y-year)))return null;return {kind,id:ranked[0].x.id};
 }
 async function aoMobileRecommendations(item,excluded=[],stillActive=()=>true){
   const match=await aoMobileTmdbMatch(item,stillActive);if(!match)return [];const {kind,id}=match;
@@ -165,6 +166,7 @@ async function openAoMobileDetails(slug, opts = {}, existingPg = null) {
     if (!alivePg(pg)) return;
     const item = aoMobileCompact({...raw, anime_url: raw.anime_url || slug});
     const md = raw.material_data || {};
+    item._aoAliases=[...String(raw.other_title||'').split(/\s+\/\s+/),...(raw.franchise?.nodes||[]).filter(x=>String(x.id)===String(raw.franchise.current_id)).map(x=>x.name)].filter(Boolean).slice(0,8);
     // Как на ПК: у подробной карточки приоритет у anime_poster, у каталога — poster.
     item.poster = aoMobileImage(raw.anime_poster || raw.poster || md.anime_poster || '') || item.poster;
     const description = raw.description || md.anime_description || md.description || 'Описание пока недоступно.';

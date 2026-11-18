@@ -19,8 +19,8 @@ android {
         applicationId = "ws.luma.mobile"
         minSdk = 24
         targetSdk = 34
-        versionCode = 10
-        versionName = "0.5.1"
+        versionCode = 11
+        versionName = "0.5.2"
         buildConfigField("String", "DRIVE_CLIENT_ID", "\"${syncProps.getProperty("driveClientId", "")}\"")
         buildConfigField("String", "DRIVE_CLIENT_SECRET", "\"${syncProps.getProperty("driveClientSecret", "")}\"")
         buildConfigField("String", "DRIVE_DESK_ID", "\"${syncProps.getProperty("driveDesktopClientId", "")}\"")

@@ -72,7 +72,10 @@ async function tmFindRaw(d) {
   const bds = (x.images?.backdrops || []).slice().sort((a, b) => b.vote_average - a.vote_average).slice(0, 14).map((b) => b.file_path);
   const logos = x.images?.logos || [];
   const logo = (logos.find((l) => l.iso_639_1 === 'ru') || logos.find((l) => l.iso_639_1 === 'en') || logos[0])?.file_path || '';
-  return { kind, tmdb: found.id, vote: Number(x.vote_average) || 0, imdb: x.imdb_id || (x.external_ids && x.external_ids.imdb_id) || '', backdrop: x.backdrop_path || bds[0] || '', shots: bds, logo, recs: (x.recommendations?.results || []).slice(0, 16) };
+  const sourceYear=Number(String(x.first_air_date||x.release_date||'').slice(0,4))||0;
+  const exact=[d.name,d.origin_name].map(nrm).filter(Boolean).some(n=>[x.name,x.original_name,x.title,x.original_title].map(nrm).includes(n));
+  const overview=exact&&sourceYear&&d.year&&Math.abs(sourceYear-Number(d.year))<=1?String(x.overview||'').trim():'';
+  return { kind, tmdb: found.id, vote: Number(x.vote_average) || 0, imdb: x.imdb_id || (x.external_ids && x.external_ids.imdb_id) || '', backdrop: x.backdrop_path || bds[0] || '', shots: bds, logo, overview, recs: (x.recommendations?.results || []).slice(0, 16) };
 }
 async function matchRec(t, kind) {
   const types = kind === 'tv' ? TV_TYPES : MOVIE_TYPES;
